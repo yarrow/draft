@@ -1,7 +1,7 @@
 Extract Code Blocks from Markdown
 =================================
 
-The job of CodeFilter is to return, for each code block in a Markdown file, the
+The job of CodeExtractor is to return, for each code block in a Markdown file, the
 code block's (possibly empty) info string, the line number on which the code
 block begins, and the code block itself (as a single `str`).
 
@@ -73,16 +73,12 @@ mod tests {
     fn test_get_offset() {
         #[derive(Debug, PartialEq)]
         struct Info<'a>{start: usize, end: usize, value: &'a str};
-        let text = "lorem ipsum\n```rust\nlet lorem = ip.sum();\n\n```\n";
-        let expected = Info{
-            start: text.find("let lorem").unwrap(),
-            end: text.find("```\n").unwrap(),
-            value: "let lorem = ip.sum();\n\n",
-        };
+        let text = "lorem ipsum\n```rust\nlet lorem = ip.sum();\n\n```\nDone.";
         let mut pulldown = Parser::new(text);
-        ⟨Find `start` and `end` as calculated by `pulldown`⟩;
-        let actual = Info{start, end, value: &text[start..end]};
-        assert_eq!(actual, expected);
+        ⟨Calculate `start` and `end` via `pulldown`⟩;
+        assert_eq!(start, text.find("let lorem").unwrap());
+        assert_eq!(end, text.find("```\n").unwrap());
+        assert_eq!(&text[start..end], "let lorem = ip.sum();\n\n");
     }
 
     ⟨Other tests⟩
@@ -93,18 +89,22 @@ To find the start of the block, we scan for the first `Start(CodeBlock(_))`
 returned by `next()`. At that point we know that `get_offset()` returns the
 position of the first byte beyond the line with the code fence — that is, the
 first byte of the code block proper.  Then we scan through the `Text` events,
-setting `end` to the end of each `Text` event in turn. When we're done, `end`
-will be the end of the last `Text`, which is the end of the entire code block.
+setting `end` to the end of each `Text` event in turn until we see an
+`End(CodeBlock(_))`. At that point, `end` is the end of the last `Text` in the
+block, which is the end of the entire code block.
 
 ```rust
-⟨Find `start` and `end` as calculated by `pulldown`⟩≡
+⟨Calculate `start` and `end` via `pulldown`⟩≡
     let mut start = 0;
     let mut end = 0;
     while let Some(event) = pulldown.next() {
         match event {
             Start(CodeBlock(_)) => start = pulldown.get_offset(),
             Text(_) => end = pulldown.get_offset(),
-            _ => (),
+            End(CodeBlock(_)) => break,
+            _ => if start != 0 { // We're in the code block, so ...
+                panic!("Unexpected Event {:?}", event);
+            }
         }
     }
 ```
@@ -118,7 +118,7 @@ line number where the code block begins) and an immutable `&str` which points to
 the substring of `text` containing the code block proper.
 
 ```rust
-type InfoAndRawCode<'a> = (String, usize, &'a str);
+pub(crate) struct RawCode<'a> {pub info: String, pub line: usize, pub code: &'a str}
 ```
 
 Because `pulldown`'s parser returns each code block as a series of `Text` events
@@ -130,7 +130,7 @@ a slice of `text` (whose lifetime must therefore be the same as the lifetime of
 line numbers** section).
 
 ```rust
-pub struct CodeFilter<'a> {
+pub(crate) struct CodeExtractor<'a> {
     text: &'a str,
     pulldown: Parser<'a>,
     lc: LineCounter<'a>,
@@ -138,30 +138,34 @@ pub struct CodeFilter<'a> {
 ```
 
 ```rust
-impl<'a> CodeFilter<'a> {
-    pub fn new(text: &'a str) -> CodeFilter<'a> {
-        CodeFilter {text, pulldown: Parser::new(text), lc: LineCounter::new(text)}
+impl<'a> CodeExtractor<'a> {
+    pub(crate) fn new(text: &'a str) -> CodeExtractor<'a> {
+        CodeExtractor {text, pulldown: Parser::new(text), lc: LineCounter::new(text)}
     }
 }
 ```
 
 We can't just `map()` and `filter()` the output of the pulldown parser, since
-the `InfoAndRawCode` items we output may depend on an arbitrary number of
+the `RawCode` items we output may depend on an arbitrary number of
 pulldown events.  Nevertheless, the logic is straightforward, not too different
 from our test above.
 
 ```rust
-impl<'a> Iterator for CodeFilter<'a> {
-    type Item = InfoAndRawCode<'a>;
+impl<'a> Iterator for CodeExtractor<'a> {
+    type Item = RawCode<'a>;
     
-    fn next(&mut self) -> Option<InfoAndRawCode<'a>> {
+    fn next(&mut self) -> Option<RawCode<'a>> {
         loop {
             let event = self.pulldown.next()?;
             if let Start(CodeBlock(info)) = event {
                 let info = String::from(info);
                 ⟨Find `start`, `end`, and the first non-`Text` `event`⟩;
                 if let End(CodeBlock(_)) = event {
-                    return Some((info, self.lc.line_of(start), &self.text[start..end]));
+                    return Some(RawCode{
+                        info: info,
+                        line: self.lc.line_of(start),
+                        code: &self.text[start..end]
+                    });
                 }
                 else { ⟨Handle an unexpected event⟩ }
             }
@@ -204,13 +208,13 @@ Here are some tests of the above code.
 ```rust
 ⟨Other tests⟩+≡
     fn info_strings(text: &str) -> Vec<String> {
-        CodeFilter::new(text).map(|x| x.0).collect()
+        CodeExtractor::new(text).map(|x| x.info).collect()
     }
     fn line_numbers(text: &str) -> Vec<usize> {
-        CodeFilter::new(text).map(|x| x.1).collect()
+        CodeExtractor::new(text).map(|x| x.line).collect()
     }
     fn code_texts(text: &str) -> Vec<&str> {
-        CodeFilter::new(text).map(|x| x.2).collect()
+        CodeExtractor::new(text).map(|x| x.code).collect()
     }
 
     #[test]
@@ -227,8 +231,8 @@ Here are some tests of the above code.
     }
 
     #[test]
-    fn test_degenerate_rust_block() { // Mostly to check that it doesn't panic
-        let markdown = "```rust"; // No newline, no actual code.
+    fn test_degenerate_rust_block() { // Will a code block with no text panic?
+        let markdown = "```rust";
         assert_eq!(info_strings(markdown), vec!["rust".to_string()]);
         assert_eq!(line_numbers(markdown), vec![0]);
         assert_eq!(code_texts(markdown), vec![""]);
@@ -237,9 +241,10 @@ Here are some tests of the above code.
 
 ## Calculating line numbers
 
-Once we know the starting byte `s` of a code block, we use a `LineCounter` to
-find the corresponding line number, which we define as the number of newline
-characters in `&text[0..s]`. (So the first line of the file is line 0.)
+Once we know the starting offset `s` of a code block, we use a
+`LineCounter` to find the corresponding line number, which we define as the
+number of newline characters in `&text[0..s]`. (So the first line of the file is
+line 0.)
 
 The `LineCounter` method `line_of()` returns the line number corresponding to a
 given offset into the Markdown text.  Since we'll use `line_of()` only to find
@@ -256,53 +261,53 @@ Here are tests that say those things:
 ```rust
 ⟨Other tests⟩≡
     fn lc(text: &str) -> LineCounter { LineCounter::new(text) }
-    #[test]
-    fn test_line_counter() {
-        // The first line number is 0:
-            assert_eq!(lc("abc\nx").line_of(2), 0);
 
-        // A line includes its terminating newline character:
-            assert_eq!(lc("a\n").line_of(1), 0);
-
+    #[test] fn first_is_0()  { // The first line number is 0
+        assert_eq!(lc("abc\nx").line_of(2), 0);
+    }
+    #[test] fn incl_newline() { // A line includes its terminating newline character
+        assert_eq!(lc("a\n").line_of(1), 0);
         // ... even if it's the first character of the text:
-            assert_eq!(lc("\na\n").line_of(0), 0);
-
-        // The next line begins immediately after the newline of the previous line:
-            assert_eq!(lc("a\nb").line_of(2), 1);
-
-        // We don't require a newline at the end of text:
-            assert_eq!(lc("ab").line_of(2), 0);
-
+        assert_eq!(lc("\na\n").line_of(0), 0);
+    }
+    #[test] fn begins_immediately() {
+        // Next line begins immediately after the newline of the previous line
+        assert_eq!(lc("a\nb").line_of(2), 1);
+    }
+    #[test] fn no_last_newline() { // We don't require a newline at the end of text:
+        assert_eq!(lc("ab").line_of(2), 0);
+    }
+    #[test] fn virtual_last() {
         // We act as if offsets beyond the end of the text were in one long line
-            let abc = "a\nb\nc";
-            let abcn = "a\nb\nc\n";
-            assert_eq!(lc("ab").line_of(9), 0);
-            assert_eq!(lc(abc).line_of(abc.len()+1), 2);
-            assert_eq!(lc(abc).line_of(abcn.len()+1), 2);
-            assert_eq!(lc(abc).line_of(abc.len()+100), 2);
-            assert_eq!(lc(abc).line_of(abcn.len()+100), 2);
-
-        // The `line_of()` method is sticky
-            let mut c = lc("a\nb\nc\n");
-            assert_eq!(c.line_of(1), 0);
-            assert_eq!(c.line_of(4), 2);
-            assert_eq!(c.line_of(1), 2);
+        assert_eq!(lc("ab").line_of(9), 0);
+        let abc = "a\nb\nc";
+        assert_eq!(lc(abc).line_of(abc.len()+1), 2);
+        assert_eq!(lc(abc).line_of(abc.len()+100), 2);
+        let abcn = "a\nb\nc\n";
+        assert_eq!(lc(abc).line_of(abcn.len()+1), 2);
+        assert_eq!(lc(abc).line_of(abcn.len()+100), 2);
+    }
+    #[test] fn sticky() { // The `line_of()` method is sticky
+        let mut c = lc("a\nb\nc\n");
+        assert_eq!(c.line_of(1), 0);
+        assert_eq!(c.line_of(4), 2);
+        assert_eq!(c.line_of(1), 2);
     }
 ```
 
 The `memchr` crate gives us a fast interator over the postions of newlines in
-the the Markdown text, and we'll create a `Line` struct to hold information on
-the last line found so far.  If our `Memchr` object ever runs out of newlines,
-we pretend that there is a virtual newline at position `usize::MAX`.
+the Markdown text.  It will be useful to pretend that there is an infinite
+supply of newlines, infinitely far from the end of our text. (Where "infinitely
+far" means "at position `usize::MAX`") 
 
 ```rust
 extern crate memchr;
 use self::memchr::Memchr;
 
-struct MemchrX<'a>(Memchr<'a>);
-impl<'a> MemchrX<'a> {
-    fn new(text: &'a str) -> MemchrX<'a> {
-        MemchrX(Memchr::new(b'\n', text.as_bytes()))
+struct Newlines<'a>(Memchr<'a>);
+impl<'a> Newlines<'a> {
+    fn new(text: &'a str) -> Newlines<'a> {
+        Newlines(Memchr::new(b'\n', text.as_bytes()))
     }
     fn next(&mut self) -> usize {
         match self.0.next() {
@@ -311,25 +316,40 @@ impl<'a> MemchrX<'a> {
         }
     }
 }
+```
+So if a series of `next()` calls on the inner `Memchr` returns
 
+```rust,ignore
+    Some(i), Some(j), Some(k), None, None, None ...
+```
+
+then the equivalent series of `next()` calls on our `Newlines` object returns
+
+```rust,ignore
+    i, j, k, usize:MAX, usize:MAX, usize:MAX, ...
+```
+
+We'll also need a `Line` struct to hold information on the last line found so far
+
+```rust
 #[derive(Debug)]
 struct Line {end: usize, number: usize}
 
 pub struct LineCounter<'a> {
-    newlines: MemchrX<'a>,
+    newlines: Newlines<'a>,
     current: Line,
 }
 ```
 
-We'll be using our tweaked `MemchrX` to find the next newline at or after a
-given offset, incrementing the line number each time we call `next()`.  We store
-the current line end so we know whether or not to call `next()` again for a
-given offset, and the current line number so we can return or update it.
+We'll be using `Newlines` to find the next newline at or after a given offset,
+incrementing the line number each time we call `next()`.  We store the current
+line end so we know whether or not to call `next()` again for a given offset,
+and the current line number so we can return or update it.
 
 ```rust
 impl<'a> LineCounter<'a> {
     fn new(text: &'a str) -> LineCounter<'a> {
-        let mut newlines = MemchrX::new(text);
+        let mut newlines = Newlines::new(text);
         let end = newlines.next();
         LineCounter{newlines, current: Line {end, number: 0}}
     }
