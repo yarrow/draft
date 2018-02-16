@@ -8,7 +8,7 @@ of newline characters in `&text[0..n]`. (So the first line of the file is line 0
 For efficiency and simplicity we require that our the inputs to `line_of()` be
 non-decreasing.  That is, for a given `LineCounter` `lc`, once we call
 `lc.line_of(n)`, in all following calls `lc.line_of(x)`, we must have `n ≤ x`.
-(In optimize builds we'll just return a wrong answer if `x < n`; in
+(In optimized builds we'll just return a wrong answer if `x < n`; in
 non-optimized builds we'll use `debug_assert` to panic.)
 
 We count the terminating newline as part of each line, and don't require a
@@ -47,8 +47,9 @@ mod tests {
         assert_eq!(lc(abc).line_of(abcn.len()+1), 2);
         assert_eq!(lc(abc).line_of(abcn.len()+100), 2);
     }
+    #[cfg(debug_assertions)]
     #[should_panic]
-    #[test] fn non_decreasing() { // The `line_of()` method is sticky
+    #[test] fn require_non_decreasing_arguments() { // or panic (in test mode)
         let mut c = lc("a\nb\nc\n");
         c.line_of(0); c.line_of(4); c.line_of(0); 
     }

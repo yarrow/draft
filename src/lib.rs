@@ -1,7 +1,10 @@
 // #![cfg_attr(feature = "cargo-clippy", deny(clippy, clippy_pedantic))]
 #![cfg_attr(feature = "cargo-clippy", deny(clippy))]
+#![cfg_attr(feature = "cargo-clippy", warn(clippy_pedantic))]
 #![cfg_attr(feature = "cargo-clippy",
-    allow(missing_docs_in_private_items, // This is the Markdown source
+    allow(
+        missing_docs_in_private_items, // For now, the Markdown source contains the private docs
+        print_stdout,
     ))]
 //! See README
 // #![allow(dead_code)] // FIXME remove when we're done
