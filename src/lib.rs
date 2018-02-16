@@ -6,9 +6,12 @@
 //! See README
 // #![allow(dead_code)] // FIXME remove when we're done
 // #![allow(unused_variables)] // FIXME remove when we're done
+
+mod line_counter;
+
 mod code_extractor;
-pub use code_extractor::LineCounter;
 use code_extractor::{CodeExtractor, RawCode};
+
 pub fn show_raw(text: &str) { // DELETEME: Just to silence dead code warnings
     let blocks = CodeExtractor::new(text);
     for RawCode{code, line, info} in blocks {

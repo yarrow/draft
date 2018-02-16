@@ -126,10 +126,12 @@ rather than as one large text event, we'll use the strings embedded in pulldown
 events only for the info string.  For the code block proper, we'll use
 `get_offset()`, as above, to find the start and end of the code block, returning
 a slice of `text` (whose lifetime must therefore be the same as the lifetime of
-`text`).  We'll also use a `LineCounter` struct (created in the **Calculating
-line numbers** section).
+`text`).  We'll also use a `LineCounter` (from the eponymous module) to return
+the line number of each code block.
 
 ```rust
+use line_counter::LineCounter;
+
 pub(crate) struct CodeExtractor<'a> {
     text: &'a str,
     pulldown: Parser<'a>,
@@ -153,7 +155,7 @@ from our test above.
 ```rust
 impl<'a> Iterator for CodeExtractor<'a> {
     type Item = RawCode<'a>;
-    
+
     fn next(&mut self) -> Option<RawCode<'a>> {
         loop {
             let event = self.pulldown.next()?;
@@ -239,141 +241,3 @@ Here are some tests of the above code.
     }
 ```
 
-## Calculating line numbers
-
-Once we know the starting offset `s` of a code block, we use a
-`LineCounter` to find the corresponding line number, which we define as the
-number of newline characters in `&text[0..s]`. (So the first line of the file is
-line 0.)
-
-The `LineCounter` method `line_of()` returns the line number corresponding to a
-given offset into the Markdown text.  Since we'll use `line_of()` only to find
-the starting line number of each code block, we can require that its inputs be
-non-increasing.
-
-We'll count the terminating newline as part of each line, and won't require a
-newline at the very end of the text.  For efficiency's sake the `line_of()`
-method is sticky — having once returned a number `n`, it never returns a lesser
-number.
-
-Here are tests that say those things:
-
-```rust
-⟨Other tests⟩≡
-    fn lc(text: &str) -> LineCounter { LineCounter::new(text) }
-
-    #[test] fn first_is_0()  { // The first line number is 0
-        assert_eq!(lc("abc\nx").line_of(2), 0);
-    }
-    #[test] fn incl_newline() { // A line includes its terminating newline character
-        assert_eq!(lc("a\n").line_of(1), 0);
-        // ... even if it's the first character of the text:
-        assert_eq!(lc("\na\n").line_of(0), 0);
-    }
-    #[test] fn begins_immediately() {
-        // Next line begins immediately after the newline of the previous line
-        assert_eq!(lc("a\nb").line_of(2), 1);
-    }
-    #[test] fn no_last_newline() { // We don't require a newline at the end of text:
-        assert_eq!(lc("ab").line_of(2), 0);
-    }
-    #[test] fn virtual_last() {
-        // We act as if offsets beyond the end of the text were in one long line
-        assert_eq!(lc("ab").line_of(9), 0);
-        let abc = "a\nb\nc";
-        assert_eq!(lc(abc).line_of(abc.len()+1), 2);
-        assert_eq!(lc(abc).line_of(abc.len()+100), 2);
-        let abcn = "a\nb\nc\n";
-        assert_eq!(lc(abc).line_of(abcn.len()+1), 2);
-        assert_eq!(lc(abc).line_of(abcn.len()+100), 2);
-    }
-    #[test] fn sticky() { // The `line_of()` method is sticky
-        let mut c = lc("a\nb\nc\n");
-        assert_eq!(c.line_of(1), 0);
-        assert_eq!(c.line_of(4), 2);
-        assert_eq!(c.line_of(1), 2);
-    }
-```
-
-The `memchr` crate gives us a fast interator over the postions of newlines in
-the Markdown text.  It will be useful to pretend that there is an infinite
-supply of newlines, infinitely far from the end of our text. (Where "infinitely
-far" means "at position `usize::MAX`") 
-
-```rust
-extern crate memchr;
-use self::memchr::Memchr;
-
-struct Newlines<'a>(Memchr<'a>);
-impl<'a> Newlines<'a> {
-    fn new(text: &'a str) -> Newlines<'a> {
-        Newlines(Memchr::new(b'\n', text.as_bytes()))
-    }
-    fn next(&mut self) -> usize {
-        match self.0.next() {
-            Some(n) => n,
-            None => ::std::usize::MAX,
-        }
-    }
-}
-```
-So if a series of `next()` calls on the inner `Memchr` returns
-
-```rust,ignore
-    Some(i), Some(j), Some(k), None, None, None ...
-```
-
-then the equivalent series of `next()` calls on our `Newlines` object returns
-
-```rust,ignore
-    i, j, k, usize:MAX, usize:MAX, usize:MAX, ...
-```
-
-We'll also need a `Line` struct to hold information on the last line found so far
-
-```rust
-#[derive(Debug)]
-struct Line {end: usize, number: usize}
-
-pub struct LineCounter<'a> {
-    newlines: Newlines<'a>,
-    current: Line,
-}
-```
-
-We'll be using `Newlines` to find the next newline at or after a given offset,
-incrementing the line number each time we call `next()`.  We store the current
-line end so we know whether or not to call `next()` again for a given offset,
-and the current line number so we can return or update it.
-
-```rust
-impl<'a> LineCounter<'a> {
-    fn new(text: &'a str) -> LineCounter<'a> {
-        let mut newlines = Newlines::new(text);
-        let end = newlines.next();
-        LineCounter{newlines, current: Line {end, number: 0}}
-    }
-    fn line_of(&mut self, offset: usize) -> usize {
-        ⟨Calculate and return the line number⟩
-    }
-}
-```
-
-Each line counter has the invariant that `current.end` is always the end of the
-current line: the position of the first newline at or after the last `offset`
-argument to `line_of()` (or simply the first newline, for the line counter value
-returned by `new()`); and that `current.number` is the count of newlines whose
-postion is strictly less than `current.end`.
-
-Calling `newlines.next()` gives us the offset of the next newline in `text`. So
-to find the line number of the `offset` parameter, we keep calling
-`newline.next()` until it returns a number at least as great as `offset`.
-
-```rust
-⟨Calculate and return the line number⟩≡
-    while self.current.end < offset {
-        self.current.number += 1;
-        self.current.end = self.newlines.next();
-    }
-    self.current.number
-```
