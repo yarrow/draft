@@ -2,8 +2,7 @@ Extract Code Blocks from Markdown
 =================================
 
 The job of CodeExtractor is to return, for each code block in a Markdown file, the
-code block's (possibly empty) info string, the line number on which the code
-block begins, and the code block itself (as a single `str`).
+code block's (possibly empty) info string and the code block itself (as a single `str`).
 
 Commonmark's flavor of Markdown provides for
 [fenced code blocks](http://spec.commonmark.org/0.28/#fenced-code-blocks),
@@ -21,19 +20,14 @@ pub mod my_module;
 ## Pulldown Cmark
 
 Parsing Markdown is not trivial, so we'll use pulldown (the `pulldown_cmark`
-crate), which supports the [Commonmark specification](http://spec.commonmark.org/)
-and is now the parser of choice for `rustdoc`.
+crate), which supports the [Commonmark
+specification](http://spec.commonmark.org/) and is now the parser of choice for
+`rustdoc`.  Pulldown's parser iterator returns a stream of events, of which the
+relevant ones for us are the `Start(CodeBlock())` and `End(CodeBlock())`
+events, and the `Text()` events between them.
 
 ```rust
-extern crate pulldown_cmark;
-```
-
-Pulldown's parser iterator returns a stream of events, of which the relevant
-ones for us are the `Start(CodeBlock())` and `End(CodeBlock())` events, and the
-`Text()` events between them.
-
-```rust
-use self::pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{Event, Parser, Tag};
 use self::Event::{Start, End, Text};
 use self::Tag::{CodeBlock};
 ```
@@ -113,12 +107,11 @@ block, which is the end of the entire code block.
 
 We're going to build an iterator to pull out code blocks with info strings from
 a text string `text` (usually the entire contents of a Markdown file).  Each
-item returned will be a tuple of a `String` (the info string), a `usize` (the
-line number where the code block begins) and an immutable `&str` which points to
-the substring of `text` containing the code block proper.
+item returned will be a tuple of a `String` (the info string) and an immutable
+`&str` which points to the substring of `text` containing the code block proper.
 
 ```rust
-pub(crate) struct RawCode<'a> {pub info: String, pub line: usize, pub code: &'a str}
+type RawCode<'a> = (String, &'a str);
 ```
 
 Because `pulldown`'s parser returns each code block as a series of `Text` events
@@ -126,23 +119,19 @@ rather than as one large text event, we'll use the strings embedded in pulldown
 events only for the info string.  For the code block proper, we'll use
 `get_offset()`, as above, to find the start and end of the code block, returning
 a slice of `text` (whose lifetime must therefore be the same as the lifetime of
-`text`).  We'll also use a `LineCounter` (from the eponymous module) to return
-the line number of each code block.
+`text`).
 
 ```rust
-use line_counter::LineCounter;
-
 pub(crate) struct CodeExtractor<'a> {
     text: &'a str,
     pulldown: Parser<'a>,
-    lc: LineCounter<'a>,
 }
 ```
 
 ```rust
 impl<'a> CodeExtractor<'a> {
     pub(crate) fn new(text: &'a str) -> CodeExtractor<'a> {
-        CodeExtractor {text, pulldown: Parser::new(text), lc: LineCounter::new(text)}
+        CodeExtractor {text, pulldown: Parser::new(text)}
     }
 }
 ```
@@ -163,11 +152,7 @@ impl<'a> Iterator for CodeExtractor<'a> {
                 let info = String::from(info);
                 ⟨Find `start`, `end`, and the first non-`Text` `event`⟩;
                 if let End(CodeBlock(_)) = event {
-                    return Some(RawCode{
-                        info: info,
-                        line: self.lc.line_of(start),
-                        code: &self.text[start..end]
-                    });
+                    return Some((info, &self.text[start..end]));
                 }
                 else { ⟨Handle an unexpected event⟩ }
             }
@@ -210,13 +195,10 @@ Here are some tests of the above code.
 ```rust
 ⟨Other tests⟩+≡
     fn info_strings(text: &str) -> Vec<String> {
-        CodeExtractor::new(text).map(|x| x.info).collect()
-    }
-    fn line_numbers(text: &str) -> Vec<usize> {
-        CodeExtractor::new(text).map(|x| x.line).collect()
+        CodeExtractor::new(text).map(|x| x.0).collect()
     }
     fn code_texts(text: &str) -> Vec<&str> {
-        CodeExtractor::new(text).map(|x| x.code).collect()
+        CodeExtractor::new(text).map(|x| x.1).collect()
     }
 
     #[test]
@@ -228,7 +210,6 @@ Here are some tests of the above code.
         );
         let markdown = markdown_string.as_str();
         assert_eq!(info_strings(markdown), vec!["rust".to_string(), "ruby".to_string()]);
-        assert_eq!(line_numbers(markdown), vec![2, 7]);
         assert_eq!(code_texts(markdown), code);
     }
 
@@ -236,7 +217,6 @@ Here are some tests of the above code.
     fn test_degenerate_rust_block() { // Will a code block with no text panic?
         let markdown = "```rust";
         assert_eq!(info_strings(markdown), vec!["rust".to_string()]);
-        assert_eq!(line_numbers(markdown), vec![0]);
         assert_eq!(code_texts(markdown), vec![""]);
     }
 ```

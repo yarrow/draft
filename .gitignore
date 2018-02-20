@@ -2,3 +2,6 @@
 /target/
 **/*.rs.bk
 Cargo.lock
+src/code_extractor.rs
+src/line_counter.rs
+src/tangle.rs

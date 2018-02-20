@@ -5,20 +5,32 @@
     allow(
         missing_docs_in_private_items, // For now, the Markdown source contains the private docs
         print_stdout,
+        // for readability
+        non_ascii_literal,
+        option_unwrap_used,
+        result_unwrap_used,
+        shadow_same,
     ))]
 //! See README
-// #![allow(dead_code)] // FIXME remove when we're done
-// #![allow(unused_variables)] // FIXME remove when we're done
 
-mod line_counter;
+extern crate pulldown_cmark;
+extern crate memchr;
+extern crate regex;
 
+#[macro_use]
+extern crate lazy_static;
+
+#[macro_use]
+extern crate failure;
+
+pub mod tangle;
 mod code_extractor;
-use code_extractor::{CodeExtractor, RawCode};
+use code_extractor::{CodeExtractor};
 
 pub fn show_raw(text: &str) { // DELETEME: Just to silence dead code warnings
     let blocks = CodeExtractor::new(text);
-    for RawCode{code, line, info} in blocks {
-        println!("Code block ({}) at line {}", info, line);
+    for (code, info) in blocks {
+        println!("Code block ({})", info);
         println!("{}", code);
     }
 }
