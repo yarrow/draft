@@ -3,6 +3,7 @@
 #![cfg_attr(feature = "cargo-clippy", warn(clippy_pedantic))]
 #![cfg_attr(feature = "cargo-clippy",
     allow(
+        redundant_field_names, // Bug in clippy v0.0.187?
         missing_docs_in_private_items, // For now, the Markdown source contains the private docs
         print_stdout,
         // for readability
@@ -23,6 +24,7 @@ extern crate lazy_static;
 #[macro_use]
 extern crate failure;
 
+mod block_parse;
 pub mod tangle;
 mod code_extractor;
 use code_extractor::{CodeExtractor};

@@ -19,12 +19,12 @@ pub mod my_module;
 
 ## Pulldown Cmark
 
-Parsing Markdown is not trivial, so we'll use pulldown (the `pulldown_cmark`
-crate), which supports the [Commonmark
-specification](http://spec.commonmark.org/) and is now the parser of choice for
-`rustdoc`.  Pulldown's parser iterator returns a stream of events, of which the
-relevant ones for us are the `Start(CodeBlock())` and `End(CodeBlock())`
-events, and the `Text()` events between them.
+Parsing Markdown is not trivial, so we'll use the `pulldown-cmark` crate, which
+supports the [Commonmark specification](http://spec.commonmark.org/) and is now
+the parser of choice for `rustdoc`.  Pulldown's parser iterator returns a
+stream of events, of which the relevant ones for us are the
+`Start(CodeBlock())` and `End(CodeBlock())` events, and the `Text()` events
+between them.
 
 ```rust
 use pulldown_cmark::{Event, Parser, Tag};
@@ -38,16 +38,14 @@ Pulldown's README says:
 > the source text) is readily available; you basically just call `get_offset()` as
 > you consume events.
 
-I couldn't find further documentation on `get_offset()`.
+I couldn't find further documentation on `get_offset()`, so the following list
+of properties of pulldown that we rely on is not totally solid.  Assume we
+create a parser `p` by a statement like `let mut p = Parser::new(text)`. Then
 
-Here are the properties of pulldown that we rely on.  Assume we create a parser
-`p` by a statement like `let mut p = Parser::new(text)`. Then
-
-- If `p.next()` returns an event matching `Start(CodeBlock(_))`, then  
-  `              let start = p.get_offset()`  
-  sets `start` to the offset of the first byte of the code
-  block proper in `text`. In other words, the code block is a prefix of
-  `&text[start..]`.
+- If `p.next()` returns an event matching `Start(CodeBlock(_))`, then
+  `let start = p.get_offset()` sets `start` to the offset of the first byte of
+  the code block proper in `text`. In other words, the code block is a prefix
+  of `&text[start..]`.
 - after returning `Start(CodeBlock(_))`, `p.next()` will eventually return an
   `End(CodeBlock(_))`;
 - between those two events `p.next()` will return only zero or more `Text`
@@ -79,13 +77,13 @@ mod tests {
 }
 ```
 
-To find the start of the block, we scan for the first `Start(CodeBlock(_))`
-returned by `next()`. At that point we know that `get_offset()` returns the
-position of the first byte beyond the line with the code fence — that is, the
-first byte of the code block proper.  Then we scan through the `Text` events,
-setting `end` to the end of each `Text` event in turn until we see an
-`End(CodeBlock(_))`. At that point, `end` is the end of the last `Text` in the
-block, which is the end of the entire code block.
+To find the `start` and `end` of the block, we scan for the first
+`Start(CodeBlock(_))` returned by `next()`. At that point we know that
+`get_offset()` returns the position of the first byte beyond the line with the
+code fence — that is, the first byte of the code block proper.  Then we scan
+through the `Text` events, setting `end` to the end of each `Text` event in turn
+until we see an `End(CodeBlock(_))`. At that point, `end` is the end of the last
+`Text` in the block, which is the end of the entire code block.
 
 ```rust
 ⟨Calculate `start` and `end` via `pulldown`⟩≡
@@ -137,9 +135,9 @@ impl<'a> CodeExtractor<'a> {
 ```
 
 We can't just `map()` and `filter()` the output of the pulldown parser, since
-the `RawCode` items we output may depend on an arbitrary number of
-pulldown events.  Nevertheless, the logic is straightforward, not too different
-from our test above.
+the `RawCode` items we output may coalesce an arbitrary number of pulldown
+events.  Nevertheless, the logic is straightforward, not too different from our
+test above.
 
 ```rust
 impl<'a> Iterator for CodeExtractor<'a> {

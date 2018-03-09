@@ -3,7 +3,7 @@
 The job of `Tangle` is to extract the code blocks from a Markdown `str`, discard
 those that are irrelevant, and concatenate the remainder as output. It's
 actually a little more complicated than that: a code block may optionally have a
-name (a phrase or sentence prefixed by `⟨` and suffixed by '⟩', such as
+name (a phrase or sentence prefixed by '⟨' and suffixed by '⟩', such as
 `⟨Do an interesting thing⟩`).  Other block may reference the named block,
 inserting it as if it were a parameterless macro.
 
