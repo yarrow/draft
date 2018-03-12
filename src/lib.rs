@@ -14,8 +14,8 @@
     ))]
 //! See README
 
-extern crate pulldown_cmark;
 extern crate memchr;
+extern crate pulldown_cmark;
 extern crate regex;
 
 #[macro_use]
@@ -27,9 +27,10 @@ extern crate failure;
 mod block_parse;
 pub mod tangle;
 mod code_extractor;
-use code_extractor::{CodeExtractor};
+use code_extractor::CodeExtractor;
 
-pub fn show_raw(text: &str) { // DELETEME: Just to silence dead code warnings
+pub fn show_raw(text: &str) {
+    // DELETEME: Just to silence dead code warnings
     let blocks = CodeExtractor::new(text);
     for (code, info) in blocks {
         println!("Code block ({})", info);
