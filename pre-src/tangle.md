@@ -76,7 +76,7 @@ Here's a test that named sections do indeed get expanded:
     #[test]
     fn tangle_section_names() {
         let body = "section.body";
-        let name = "⟦Section⟧";
+        let name = "⟨Section⟩";
         let definition = format!("{}≡\n{}\n", name, body);
         let source = rust(&block_with(name)) + "# Head\n" + &rust(&definition);
         assert_eq!(clip(&tangle(&source)), clip(&block_with(body)));
@@ -95,6 +95,7 @@ Here's a test that named sections do indeed get expanded:
 ```rust
 use std::collections::HashMap;
 use code_extractor::{CodeExtractor};
+use block_parse::{BlockParse, Unterminated};
 
 type CodeBlocks<'a> = HashMap<String, Vec<&'a str>>;
 pub struct Tangle<'a> {
@@ -121,26 +122,30 @@ impl<'a> Tangle<'a> {
         }
     }
     fn expand(&self, blocks: &[&str]) -> Result<String, Error> {
-        lazy_static! {
-            static ref SECTION: Regex = Regex::new(r"(?s)⟦.*?⟧").unwrap();
-        }
         let mut expansion = String::new();
         for block in blocks {
             let mut current = 0; // Index of the last unprocessed byte of block
-            for section_name in SECTION.find_iter(block) {
-                let (start, end) = (section_name.start(), section_name.end());
-                // Append anything before the section name to `expansion`
-                    if current < start {
-                        expansion += &block[current..start];
+            for parse_result in BlockParse::new(block) {
+                match parse_result {
+                    Ok((start, end)) => {
+                        // Append anything before the section name to `expansion`
+                            if current < start {
+                                expansion += &block[current..start];
+                            }
+                            current = end;
+                        // Append the section name as a comment
+                            expansion += "\n// ";
+                            expansion += &block[start..end];
+                            expansion += "\n";
+                        // Append the section body
+                        let key = normalize_whitespace(&block[start+3..end-3]);
+                        expansion += &self.get(&key)?;
                     }
-                    current = end;
-                // Append the section name as a comment
-                    expansion += "\n// ";
-                    expansion += section_name.as_str();
-                    expansion += "\n";
-                // Append the section body
-                let key = normalize_whitespace(&block[start+3..end-3]);
-                expansion += &self.get(&key)?;
+                    Err(e) => {
+                        let Unterminated{kind, start, end} = e;
+                        eprintln!("unterminated {}:\n|{}|", kind, &block[start..end]);
+                    }
+                }
             }
             // Append anything after the last section name
                 if current < block.len() {
@@ -161,7 +166,7 @@ file.
     if key.is_empty() {
         bail!("No unnamed code blocks were found")
     } else {
-        bail!("No code block named ⟦{}⟧ was found", key)
+        bail!("No code block named ⟨{}⟩ was found", key)
     }
 ```
 
@@ -173,7 +178,7 @@ between `⟨` and `⟩`, with whitespace normalized.
 use regex::Regex;
 fn extract_key(text: &str) -> (String, &str) {
     lazy_static! {
-        static ref TITLE: Regex = Regex::new(r"(?s)^\s*⟦(.*?)⟧(?:\+?)≡[ \t\r]*").unwrap();
+        static ref TITLE: Regex = Regex::new(r"(?s)^\s*⟨(.*?)⟩(?:\+?)≡[ \t\r]*").unwrap();
     }
     let mut text = text;
     let mut key = String::from("");

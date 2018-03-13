@@ -11,6 +11,7 @@
         option_unwrap_used,
         result_unwrap_used,
         shadow_same,
+        string_add,
     ))]
 //! See README
 
