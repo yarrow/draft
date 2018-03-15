@@ -1,15 +1,45 @@
 # Tangle
 
-The job of `Tangle` is to extract the code blocks from a Markdown `str`, discard
-those that are irrelevant, and concatenate the remainder as output. It's
-actually a little more complicated than that: a code block may optionally have a
-name (a phrase or sentence prefixed by '⟨' and suffixed by '⟩', such as
-`⟨Do an interesting thing⟩`).  Other block may reference the named block,
-inserting it as if it were a parameterless macro.
+The job of `Tangle` is to extract the code blocks from a Markdown string,
+discard those that are irrelevant, and concatenate the remainder as output. It's
+actually a little more complicated than that: a code block is part of a code
+*section*, either named or unnamed.  A named section is introduced as in the
+following example:
 
-Unnamed blocks are treated as if their name was the empty string.  If there are
-no named blocks, the result of `Tangle.new(&source).get("")` is the simply
-concatenation of the code blocks labeled `rust` in `source`.
+    ```rust
+    ⟨Example⟩≡
+        some.code.goes("here");
+    ```
+
+where the name is a phrase or sentence prefixed by `⟨` and suffixed by `⟩` and
+followed by `≡`.  Other sections may reference the named section, inserting it
+as if it were a parameterless macro.  A section may consist of multiple disjoint
+code blocks: the following would cause `more_code("goes here")` to be appended
+to the `⟨Example⟩` section:
+
+    ```rust
+    ⟨Example⟩≡
+        more_code("goes here")
+    ```
+
+Blocks not introduced by a name are treated as part of the unnamed section
+string.  If there are no named blocks, the result of
+`Tangle.new(&source).get("")` is the simply concatenation of the code blocks
+labeled `rust` in `source`.
+
+Code sections may reference one another:
+
+    ```rust
+    ⟨Get cheese or panic⟩
+        if ⟨Moon is made of green cheese⟩ {
+            ⟨Export cheese to Earth⟩
+        } else {
+            panic!("No cheese!")
+        }
+    ```
+
+would cause the bodies of the `⟨Moon is made of green cheese⟩` and `⟨Export
+cheese to Earth⟩` sections to be inserted in the ⟨Get cheese or panic⟩ section.
 
 ## Tests
 
@@ -46,7 +76,7 @@ mod tests {
 }
 ```
 
-As we said above, a block might contain a reference to another block:
+As we said above, a block might contain a reference to a code section:
 
     ```rust
     pub fn isqrt(n: u32) -> u32 {
@@ -55,14 +85,14 @@ As we said above, a block might contain a reference to another block:
     }
     ```
 
-...where the named block might later be defined as:
+...where the named section might later be defined as:
 
     ```rust
     ⟨Set `root` to the least `r` such that `r * r ≥ n`⟩≡
 		let root = (n as f64).sqrt() as u32;
     ```
 
-Admittedly this seems like overkill — but suppose the named section was actually
+This example may seem like overkill — but suppose the named section was actually
 an implementation of Newton's method, intended for a machine with very slow
 floating point operations.
 
@@ -88,62 +118,63 @@ Here's a test that named sections do indeed get expanded:
 `Tangle` has three methods:
 - `let tangle = Tangle::new(text)` creates a new `Tangle` from a Markdown `str`.
 - `tangle.get("")` gets the final product, concatenating the expansions of all
-  the unnamed blocks, while `tangle.get(title)` returns the block with the name
-  contained in `title`.
+  the blocks in the unnamed section, while `tangle.get(section_name)` returns
+  the section with the given name.
 - The private method `expand` does the actual expansion.
 
 ```rust
 use std::collections::HashMap;
 use code_extractor::{CodeExtractor};
-use block_parse::{BlockParse, Unterminated};
+use block_parse::{BlockParse};
+use Span;
+use Ilk;
 
 type CodeBlocks<'a> = HashMap<String, Vec<&'a str>>;
 pub struct Tangle<'a> {
-    code_blocks: CodeBlocks<'a>,
+    sections: CodeBlocks<'a>,
 }
 
 use failure::Error;
 impl<'a> Tangle<'a> {
     pub fn new(text: &'a str) -> Tangle<'a> {
-        let mut code_blocks = CodeBlocks::default();
+        let mut sections = CodeBlocks::default();
         for (info, code) in CodeExtractor::new(text) {
             if info == "rust" {
                 let (key, code) = extract_key(code); 
-                let mut blocks = code_blocks.entry(key).or_insert_with(|| vec![]);
-                blocks.push(code);
+                let mut section = sections.entry(key).or_insert_with(|| vec![]);
+                section.push(code);
             }
         }
-        Tangle{code_blocks}
+        Tangle{sections}
     }
     pub fn get(&self, key: &str) -> Result<String, Error> {
-        match self.code_blocks.get(key) {
-            Some(code) => Ok(self.expand(code)?),
+        match self.sections.get(key) {
+            Some(section) => Ok(self.expand(section)?),
             None => ⟨Complain that `key` was not found⟩
         }
     }
-    fn expand(&self, blocks: &[&str]) -> Result<String, Error> {
+    fn expand(&self, section: &[&str]) -> Result<String, Error> {
         let mut expansion = String::new();
-        for block in blocks {
+        for block in section {
             let mut current = 0; // Index of the last unprocessed byte of block
-            for parse_result in BlockParse::new(block) {
-                match parse_result {
-                    Ok((start, end)) => {
-                        // Append anything before the section name to `expansion`
-                            if current < start {
-                                expansion += &block[current..start];
-                            }
-                            current = end;
+            for Span{lo, hi, ilk} in BlockParse::new(block) {
+                // Append anything before the `Span` to `expansion`
+                    if current < lo {
+                        expansion += &block[current..lo];
+                    }
+                    current = hi;
+                match ilk {
+                    Ilk::SectionName => {
                         // Append the section name as a comment
                             expansion += "\n// ";
-                            expansion += &block[start..end];
+                            expansion += &block[lo..hi];
                             expansion += "\n";
                         // Append the section body
-                        let key = normalize_whitespace(&block[start+3..end-3]);
+                        let key = normalize_whitespace(&block[lo+3..hi-3]);
                         expansion += &self.get(&key)?;
                     }
-                    Err(e) => {
-                        let Unterminated{kind, start, end} = e;
-                        eprintln!("unterminated {}:\n|{}|", kind, &block[start..end]);
+                    Ilk::Unterminated(kind) => {
+                        eprintln!("unterminated {}:\n|{}|", kind, &block[lo..hi]);
                     }
                 }
             }
@@ -158,7 +189,7 @@ impl<'a> Tangle<'a> {
 ```
 
 If a section name isn't found, we reference it in our error message.  If the
-empty string isn't found, there were no unnamed code sections in the Markdown
+empty string isn't found, there were no unnamed code blocks in the Markdown
 file.
 
 ```rust
@@ -166,11 +197,11 @@ file.
     if key.is_empty() {
         bail!("No unnamed code blocks were found")
     } else {
-        bail!("No code block named ⟨{}⟩ was found", key)
+        bail!("No section named ⟨{}⟩ was found", key)
     }
 ```
 
-To add a block to the `code_blocks` table, we must first check for a section
+To add a block to the `sections` table, we must first check for a section
 definition (something of the form `⟨...⟩≡`). If it exists, the key is the part
 between `⟨` and `⟩`, with whitespace normalized.
 

@@ -30,6 +30,19 @@ pub mod tangle;
 mod code_extractor;
 use code_extractor::CodeExtractor;
 
+#[derive(Debug, PartialEq, Eq)]
+enum Ilk {
+    SectionName,
+    Unterminated(&'static str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Span {
+    lo: usize,
+    hi: usize,
+    ilk: Ilk,
+}
+
 pub fn show_raw(text: &str) {
     // DELETEME: Just to silence dead code warnings
     let blocks = CodeExtractor::new(text);
