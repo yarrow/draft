@@ -1,19 +1,28 @@
 BlockParse
 ==========
 
-The call `BlockParse::new(text)` returns an iterator over the block names in
-`text`: for each occurence of a section name `⟨ … ⟩` in `text` the iterator
-returns a `(start, end)` pair such that `text[start..end]` is the section name
-found.
+The call `BlockParse::new(text)` returns an iterator over the interesting parts
+of `text`.  (The uninteresting parts are simply appended to the output.) A
+`Span` is interesting if it is a section name (which `Tangle` must expand), or
+an unterminated comment or quote (which `Tangle` must report to the user).
+Specifically, for each occurence of a section name `⟨ … ⟩` in `text` the
+iterator returns a `Span{lo, hi, ilk: SectionName}` value such that
+`text[lo..hi]` is the section name found.  While if it finds a comment, quote,
+or block name that begins within the block but doesn't end, it returns a
+`Span{lo, hi, ilk: Unterminated(s)}` value where `s` describes the unterminated
+item.
 
-However, if '⟨' occurs inside a comment or quote, it doesn't start a section
-name.
+(We need to parse comments and quotes because an angle bracket '⟨' that occurs
+inside one of those has no special significance, so it doesn't start a section
+name. The iterator skips paste comments and quotes.)
 
-Here's the outline of the implementation:
+Here's the implementation outline:
 
 ```rust
-#![allow(unused)]
 use regex::Regex;
+use Span;
+use Ilk;
+use Ilk::{Unterminated, SectionName};
 
 pub(crate) struct BlockParse<'a> {
     text: &'a str,
@@ -28,18 +37,8 @@ impl<'a> BlockParse<'a> {
 }
 
 impl<'a> Iterator for BlockParse<'a> {
-    type Item = ParseResult;
+    type Item = Span;
     ⟨The `next` method⟩
-}
-
-type ParseResult = Result<StrBounds, Unterminated>;
-type StrBounds = (usize, usize);
-#[derive(Debug, Fail, PartialEq, Eq)]
-#[fail(display = "unterminated {} starting {}, ending {}", kind, start, end)]
-pub(crate) struct Unterminated {
-    pub(crate) kind: &'static str,
-    pub(crate) start: usize,
-    pub(crate) end: usize,
 }
 
 ⟨Other definitions⟩
@@ -47,15 +46,7 @@ pub(crate) struct Unterminated {
 
 ## Tests
 
-We want to find the start of the next block name, which will begin with '⟨'; but
-we need to take into account comments and character or string literals, since a
-'⟨' in the middle of one of those does not start a section name. Our strategy
-will be to find the start of the next item — comment, character/string literal,
-or block name — and then use specialized routines to find the end of the item.
-If the item is a block name, we return its bounds; otherwise we skip to the next
-item.
-
-Here are some tests that we can skip over each of those things. (Details later)
+Here are some tests that the iterator successfully skips quotes and comments. (Details later)
 
 ```rust
 ⟨Tests⟩≡
@@ -63,13 +54,14 @@ Here are some tests that we can skip over each of those things. (Details later)
     skip_through!(line_comment, "//⟨\n");
     skip_through!(nested_block_comment, "/* ⟨ /* ⟨y⟩ */ ⟩*/");
     skip_through!(char_literal, "'⟨'");
+    skip_through!(long_illegal_char_literal, "'⟨not a section name⟩'");
     skip_through!(byte_escaped_char, r"'\n'");
     skip_through!(illegal_byte_escaped_char, r"'\b'");
     skip_through!(hex_escaped_char, r"'\x7F'");
     skip_through!(illegal_hex_escaped_char, r"'\x77GGGG'");
     skip_through!(unicode_escaped_char, r"'\u{77FF}'");
     skip_through!(illegal_unicode_escaped_char, r"'\u{77⟨F⟩F}'");
-    skip_through!(string_with_embedded_block_name, r#""⟨y⟩""#);
+    skip_through!(string_with_embedded_section_name, r#""⟨y⟩""#);
     skip_through!(string_with_escaped_double_quote, r#""\"⟨y⟩""#);
     skip_through!(string_with_escaped_escape_is_compared_to_the_empty_string, r#""\\"== """#);
     skip_through!(all_char_examples_in_one_string, r#""⟨\n\b\x7F\x77GGG\u{77FF}\u{77⟨F⟩F}""#);
@@ -79,43 +71,43 @@ Here are some tests that we can skip over each of those things. (Details later)
     skip_through!(illegal_char_thats_also_identifier, "'arrrr'");
 ```
 
-
 And here's a test that we can handle raw quotes with hundreds of hash marks in
-the opening and closing quotes.
+the opening and closing quotes: specifically, a raw-quoted string with 1000 `#`
+characters in the opening and closing quotes, in which is embedded a raw-quoted
+string with 999 `#` characters in its quotes.
 
 ```rust
 ⟨Tests⟩≡
     #[test]
     fn test_very_fat_raw_quotes() {
         let hash = "#".repeat(999);
-        // Set `raw` to a raw-quoted string with 1000 #'s, containing
-        // a raw-quoted string with 999 #'s
-            let raw = format!(r##"r{}#"r"{}⟨y⟩"{}"#{}"##, hash, hash, hash, hash);
+        let raw = format!(r##"r{}#"r"{}⟨y⟩"{}"#{}"##, hash, hash, hash, hash);
         expect_ok(&raw, here!());
     }
 ```
 
-But if a comment or character or string literal isn't properly terminated, we
-want to return an error.
+Here are tests to check that an unterminated comment, quote, or section name
+causes the iterator to return a `Span` value whose `ilk` is `Unterminated`.
 
 ```rust
 ⟨Tests⟩≡
-    complain_about!(unterminated_block_name, "⟨A block name");
-    complain_about!(unterminated_char_literal, "'⟨");
-    complain_about!(unterminated_char_literal_with_newline, "'^\nabcdef\n");
-    complain_about!(confusing_unterminated_char, "'^⟨Not a section name⟩\n");
+    complain_about!(unterminated_section_name, "⟨A block name");
     complain_about!(unterminated_line_comment, "//⟨");
     complain_about!(unterminated_nested_block_comment, "/* ⟨ /* ⟨y⟩ */ ⟩");
+    complain_about!(unterminated_string_with_embedded_section_name, r#""⟨y⟩"#);
+    complain_about!(unterminated_string_with_escaped_double_quote, r#""\"⟨y⟩"#);
+    complain_about!(unterminated_string_with_internal_newline, "\"\n");
+    complain_about!(unterminated_raw_string, r####"r###"""##"####);
     complain_about!(unterminated_byte_escaped_char, r"'\n");
     complain_about!(unterminated_illegal_byte_escaped_char, r"'\b");
     complain_about!(unterminated_hex_escaped_char, r"'\x7F");
     complain_about!(unterminated_illegal_hex_escaped_char, r"'\x77GGGG");
     complain_about!(unterminated_unicode_escaped_char, r"'\u{77FF}");
     complain_about!(unterminated_illegal_unicode_escaped_char, r"'\u{77⟨F⟩F}");
-    complain_about!(unterminated_string_with_embedded_block_name, r#""⟨y⟩"#);
-    complain_about!(unterminated_string_with_escaped_double_quote, r#""\"⟨y⟩"#);
-    complain_about!(unterminated_string_with_internal_newline, "\"\n");
-    complain_about!(unterminated_raw_string, r####"r###"""##"####);
+    complain_about!(confusing_unterminated_char, "'^⟨section name⟩\n");
+    complain_about!(unterminated_char_literal, "'⟨x");
+    complain_about!(unterminated_char_literal_with_newline, "'^\nabcdef\n");
+    complain_about!(unterminated_backslash_char, "'\\");
 ```
 
 Here are the promised test details, including definitions for the `skip_through`
@@ -125,7 +117,7 @@ and `complain_about` macros.
 #[cfg(test)]
 mod tests {
     use super::*;
-    const BLOCK_X: &str = "⟨x⟩";
+    const SECTION_NAME: &str = "⟨x⟩";
 
     macro_rules! here {
          () => { &format!("(called at line {})", line!()) }
@@ -137,10 +129,10 @@ mod tests {
     }
 
     fn expect_ok(prefix: &str, msg: &str) {
-        let start = prefix.len();
-        let text = String::from(prefix) + BLOCK_X;
-        let names: Vec<ParseResult> = BlockParse::new(&text).collect();
-        assert_eq!(names, [Ok((start, text.len()))], "{}", msg);
+        let lo = prefix.len();
+        let text = String::from(prefix) + SECTION_NAME;
+        let names: Vec<Span> = BlockParse::new(&text).collect();
+        assert_eq!(names, [Span{lo, hi:text.len(), ilk: SectionName}], "{}", msg);
     }
 
     macro_rules! complain_about {
@@ -148,12 +140,14 @@ mod tests {
             #[test] fn $name() { expect_unterminated($prefix, here!()) }
         }
     }
+
     fn expect_unterminated(text: &str, msg: &str) {
-        let last: ParseResult = BlockParse::new(&text).last().unwrap();
-        assert!(last.is_err(), "Not Err {}", msg);
-        if let Err(ref unterm) = last {
-            assert!(unterm.kind.len() > 0, "Empty kind {}", msg);
-            assert_eq!((unterm.start, unterm.end), (0, text.len()), "{}", msg);
+        let Span{lo, hi, ilk} = BlockParse::new(&text).nth(0).unwrap();
+        ⟨Set `end` to the expected end of the unterminated `Span`⟩
+        assert_eq!((lo, hi), (0, end), "{}", msg);
+        match ilk {
+            Unterminated(_) => (),
+            _ => panic!("Expected Unterminated {}", msg),
         }
     }
 
@@ -161,18 +155,32 @@ mod tests {
 }
 ```
 
+Unterminated comments and string literals generally consume the remainder of
+their block; unterminated characters stop after one possibly escaped character.
+
+```rust
+⟨Set `end` to the expected end of the unterminated `Span`⟩≡
+    let ch: Vec<char> = text.chars().take(3).collect();
+    let mut end = text.len();
+    if ch.len() > 1 && ch[0] == '\'' {
+        end = if ch.len() > 2 && ch[1] == '\\' { 2 + ch[2].len_utf8() }
+        else { 1 + ch[1].len_utf8() }
+    }
+```
+
 ## Implementation
 
-The `BlockParse` iterator's `next` method looks for the start of an item: block
-name, comment, or string or character literal, returning `None` if it can't find
-one. If it finds a valid block name, it will return an `Ok(StrBounds(_))` value
-with the starting and ending indices of the item in `text`.  If it finds an
-invalid item, it returns and error, again with the starting and ending indices
-of the invalid item, as well as a string describing the kind of the item.
+The `BlockParse` iterator's `next` method looks for the start of an item:
+section name, comment, or string or character literal, returning `None` if it
+can't find one. If it finds a valid section name, or an unterminated item, it
+will return a `Span` value with the starting and ending indices of the item in
+`text`. If the item is unterminated, the value's `ilk` field is `Unterminated`,
+with a string describing the kind of the unterminated item. The `ilk` of a valid
+section name is `SectionName`.
 
 ```rust
 ⟨The `next` method⟩≡
-    fn next(&mut self) -> Option<ParseResult> {
+    fn next(&mut self) -> Option<Span> {
         lazy_static! {
             static ref START: Regex = Regex::new(r##"(?x)// | ⟨ | /\* | r\#*" | " | ' "##).unwrap();
         }
@@ -182,38 +190,25 @@ of the invalid item, as well as a string describing the kind of the item.
                 (found.start(), found.end() - found.start())
             };
 
-            let item_start = self.scan_from + found_start;
-            self.scan_from = item_start;
+            let lo = self.scan_from + found_start;
+            self.scan_from = lo;
 
-            if let Some((item_end, kind)) = self.scan_item(start_len) {
-                self.scan_from = item_end;
-                return if kind == VALID_BLOCK_NAME {
-                    Some(Ok((item_start, item_end)))
-                } else {
-                    Some(Err(Unterminated{kind, start: item_start, end: item_end}))
-                }
+            if let Some((hi, ilk)) = self.scan_item(start_len) {
+                self.scan_from = hi;
+                return Some(Span{lo, hi, ilk});
             }
         }
     }
 ```
 
-The `scan_item` method's method is not a `Result` but a simple `Option`: `None`
-when the item is succesfully parsed and is not a block name (and can therefore
-be ignored); a tuple with containing the ending index of the item and its
-description for a valid block name or an invalid item of any kind.
+The `scan_item` method returns an `Option`: `None` when the item is succesfully
+parsed and is not a section name (and can therefore be ignored); a tuple
+containing the ending index of the item and its `Ilk` for a valid section name or
+an invalid item of any kind.
 
 ```rust
 ⟨Other definitions⟩≡
-    type TokenInfo = Option<(usize, &'static str)>;
-```
-
-When we successfully parse a block name, `scan_item` returns the end of the
-block name, and a string. The `next` method doesn't pass the string on, so it
-might as well be the empty string.
-
-```rust
-⟨Other definitions⟩≡
-    const VALID_BLOCK_NAME: &str = "";
+    type TokenEnd = Option<(usize, Ilk)>;
 ```
 
 The `scan_item` method expects `scan_from` to point to the first byte of the
@@ -224,23 +219,26 @@ byte, to distinguish block comments from line comments.)
 ```rust
 ⟨Private methods⟩≡
     fn byte_at(&self, j: usize) -> u8 { self.text.as_bytes()[j] }
-    fn scan_item(&mut self, start_len: usize) -> TokenInfo {
-        const BLOCK_NAME_END: &str = "⟩";
+    fn current_byte(&self) -> u8 { self.byte_at(self.scan_from) }
+    fn next_byte(&self) -> u8 { self.byte_at(self.scan_from + 1) }
+    fn previous_byte(&self) -> u8 { self.byte_at(self.scan_from - 1) }
+
+    fn scan_item(&mut self, start_len: usize) -> TokenEnd {
+        const SECTION_NAME_END: &str = "⟩";
         const LINE_COMMENT_END: &str = "\n";
         const FIRST_BYTE_OF_OPEN_BRACKET: u8 = 226; // b"⟨" == [226, 159, 168]
-        ⟨Define the `STR_QUOTE` and `CHAR_OR_LIFETIME` patterns⟩
-        let mut key_byte = self.byte_at(self.scan_from);
+        let mut key_byte = self.current_byte();
         if key_byte == b'/' {
-            key_byte = self.byte_at(self.scan_from+1);
+            key_byte = self.next_byte()
         }
         self.scan_from += start_len;
         Some(match key_byte {
             FIRST_BYTE_OF_OPEN_BRACKET => {
-                if let Some(info) = self.scan_through("block name", BLOCK_NAME_END) { info }
-                else { (self.scan_from, VALID_BLOCK_NAME) }
+                if let Some(info) = self.scan_through("section name", SECTION_NAME_END) { info }
+                else { (self.scan_from, SectionName) }
             }
-            b'\'' => self.scan_through("character literal", &*CHAR_OR_LIFETIME)?,
-            b'"' => self.scan_through("double quote string", &*STR_QUOTE)?,
+            b'"' => self.scan_to_end_of_double_quote()?,
+            b'\'' => self.scan_through_character_literal()?,
             b'/' => self.scan_through("line comment", LINE_COMMENT_END)?,
             b'*' => self.scan_to_end_of_block_comment()?,
             b'r' => self.scan_to_end_of_raw_quote(start_len - 1)?,
@@ -257,21 +255,22 @@ string.
 ```rust
 ⟨Private methods⟩≡
     fn unscanned(&self) -> &str { &self.text[self.scan_from..] }
-    fn scan_through<T: EndFinder + ?Sized>(&mut self, kind: &'static str, pattern: &T) -> TokenInfo
+    fn end_of<T: EndFinder + ?Sized>(&mut self, pattern: &T) -> Option<usize> {
+        pattern.find_end(self.unscanned())
+    }
+    fn scan_through<T: EndFinder + ?Sized>(&mut self, kind: &'static str, pattern: &T) -> TokenEnd
     {
-        match pattern.find_end(self.unscanned()) {
+        match self.end_of(pattern) {
             Some(len) => { self.scan_from += len; None }
-            None => Some((self.text.len(), kind))
+            None => Some((self.text.len(), Unterminated(kind)))
         }
     }
 ```
 
-It might have been better to have provided different methods for `str` and
-`Regex` patterns, since we need to use different calling patterns anyway.  A
-drawback of `lazy_static` is that the references it generates to a value
+A drawback of `lazy_static` is that the references it generates to a value
 ostensibly of type `T` are not of type `&T`, but of a hidden type that
-dereferences to `T`.  So to use the generic `scan_through` with a `lazy_static`
-pattern `P`, we can't say `scan_through(kind, &P)` but need to say
+dereferences to `T`.  So to use the generic `scan_through` or `end_of` with a
+`lazy_static` pattern `P`, we can't say `scan_through(kind, &P)` but need to say
 `scan_through(kind, &*P)` — to dereference `P` to type `T` and then take a
 reference to that, which will be the desired `T`.
 
@@ -294,14 +293,80 @@ reference to that, which will be the desired `T`.
     }
 ```
 
+Since a string literal can contain newlines, we turn on the `s` Regex flag. We
+also use the `x` flag so we can space things out for a slightly more readable
+regex.
 
+Our pattern must be lazy: we want to stop at the first unescaped `"` we see.
+And it must be anchored, in order to parse escaped characters as escaped: without
+the anchoring `^`, the `STR_QUOTE` pattern would match `\"` at the `"` rather
+than moving past the escaped `"`.
+
+```rust
+⟨Private methods⟩≡
+    fn scan_to_end_of_double_quote(&mut self) -> TokenEnd {
+        lazy_static! {
+            static ref STR_QUOTE: Regex = Regex::new(
+                 r#"(?xs) ^(?: \\ . | [^\\] )*? " "#
+            ).unwrap();
+        }
+        self.scan_through("double quote string", &*STR_QUOTE)
+    }
+```
+
+We don't complain about character literals with multiple codepoints, leaving that
+to the Rust compiler. We recognize a sequence of possibly escaped characters,
+not including newlines, followed by a single quote. If there is no single quote
+before the next newline (or end of block), we just recognize one possibly
+escaped character.  We don't care about multi-character escapes like `\x7F` or
+`\u{2764}` — the only escaped characters that really affect us are `\'`, `\"`,
+and `\⟨`. 
+
+We do need to recognize lifetime identifiers, since they also start with a
+single quote. We parse non-ASCII identifiers since they're present in nightly.
+(See the [unstable book][non-ascii]).
+
+[non-ascii]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
+```rust
+⟨Private methods⟩≡
+    fn scan_through_character_literal(&mut self) -> TokenEnd {
+        const POSSIBLY_ESCAPED_CHAR: &str = r"(?x-s: \\ . | [^\\\n] )";
+        lazy_static! {
+            static ref IDENTIFIER: Regex = Regex::new(
+                r"^(?x:\p{XID_Start}\p{XID_Continue}*\b | _\p{XID_Continue}+\b)"
+            ).unwrap();
+            static ref ONE_CHAR: Regex = Regex::new(POSSIBLY_ESCAPED_CHAR).unwrap();
+            static ref CHARS: Regex = Regex::new(
+                &format!("^{}*?'", POSSIBLY_ESCAPED_CHAR)
+            ).unwrap();
+        }
+        if let Some(len) = self.end_of(&*IDENTIFIER) {
+            self.scan_from += len;
+            if self.scan_from < self.text.len() && self.current_byte() == b'\'' {
+                self.scan_from += 1;
+            }
+            None
+        } else if let Some(len) = self.end_of(&*CHARS) {
+            self.scan_from += len;
+            None
+        } else {
+            if let Some(len) = self.end_of(&*ONE_CHAR) {
+                self.scan_from += len;
+            }
+            else {
+                self.scan_from = self.text.len();
+            }
+            Some((self.scan_from, Unterminated("character literal")))
+        }
+    }
+```
 
 Since block comments can be nested, we need to keep track of the nesting level,
 incrementing it every time we see `/*` and decrementing every time we see `*/`.
 
 ```rust
 ⟨Private methods⟩≡
-    fn scan_to_end_of_block_comment(&mut self) -> TokenInfo {
+    fn scan_to_end_of_block_comment(&mut self) -> TokenEnd {
         lazy_static! {
             static ref BLOCK_COMMENT_SEGMENT: Regex = Regex::new(r"\*/|/\*").unwrap();
         }
@@ -311,7 +376,7 @@ incrementing it every time we see `/*` and decrementing every time we see `*/`.
             if info.is_some() {
                 return info
             }
-            if self.byte_at(self.scan_from - 1) == b'*' { level += 1 }
+            if self.previous_byte() == b'*' { level += 1 }
             else if level == 0 { break }
             else { level -= 1 }
         }
@@ -332,7 +397,7 @@ every time.
 
 ```rust
 ⟨Private methods⟩≡
-    fn scan_to_end_of_raw_quote(&mut self, end_len: usize) -> TokenInfo {
+    fn scan_to_end_of_raw_quote(&mut self, end_len: usize) -> TokenEnd {
         const END: &str = "\"##############################################################";
         if end_len <= END.len() {
             self.scan_through("raw string", &END[..end_len])
@@ -343,42 +408,3 @@ every time.
     }
 ```
 
-A single quote can start either a character literal or a lifetime identifier.
-We parse non-ASCII identifiers since they're present in nightly.  (See the
-[unstable book][non-ascii]).
-
-[non-ascii]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
-
-```rust
-⟨Define the `STR_QUOTE` and `CHAR_OR_LIFETIME` patterns⟩≡
-    const LIFETIME_SEQUENCE: &str = r"^(?:\p{XID_Start}\p{XID_Continue}*\b | _\p{XID_Continue}+\b)";
-```
-
-For both string and character literals we'll want to recognize a sequence of
-zero or more possibly escaped characters, starting at the initial `"` or `'` and
-ending at the final `"` or `'`. We don't care if the escape is legal, just that
-we parse `\"`, `\'` and `\\` correctly. We'll let the compiler do the
-complaining about, say, an attempted Unicode escape like `"\u{eh?"`.
-
-Our sequence must be lazy: we want to stop at the first unescaped `"` we see for
-string literals or `'` for character literals.  And it must be anchored in order
-to parse escaped characters as escaped: without the anchoring `^`, our
-`STR_QUOTE` pattern would match `\"` at the `"` rather than reporting an
-unterminated string.
-
-String literals can include literal newline characters (so we specify the `s`
-flag), while character literals cannot (so we specify the `-s` flag).
-
-```rust
-⟨Define the `STR_QUOTE` and `CHAR_OR_LIFETIME` patterns⟩≡
-    const CHAR_SEQUENCE: &str = r#"^(?x-s: \\. | [^\\\n] )*?"#;
-    const STR_SEQUENCE: &str =  r#"^(?xs:  \\. | [^\\])*?"#;
-    lazy_static! {
-        static ref CHAR_OR_LIFETIME: Regex = Regex::new(
-            &format!(r"(?x) {}' | {} ", CHAR_SEQUENCE, LIFETIME_SEQUENCE)
-        ).unwrap();
-        static ref STR_QUOTE: Regex = Regex::new(
-            &format!("{}\"", STR_SEQUENCE)
-        ).unwrap();
-    }
-```
