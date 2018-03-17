@@ -1,4 +1,5 @@
 // #![cfg_attr(feature = "cargo-clippy", deny(clippy, clippy_pedantic))]
+#![allow(unused)]
 #![cfg_attr(feature = "cargo-clippy", deny(clippy))]
 #![cfg_attr(feature = "cargo-clippy", warn(clippy_pedantic))]
 #![cfg_attr(feature = "cargo-clippy",
@@ -25,10 +26,10 @@ extern crate lazy_static;
 #[macro_use]
 extern crate failure;
 
-mod block_parse;
 pub mod tangle;
+mod block_parse;
 mod code_extractor;
-use code_extractor::CodeExtractor;
+mod line_counter;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Ilk {
@@ -41,13 +42,4 @@ struct Span {
     lo: usize,
     hi: usize,
     ilk: Ilk,
-}
-
-pub fn show_raw(text: &str) {
-    // DELETEME: Just to silence dead code warnings
-    let blocks = CodeExtractor::new(text);
-    for (code, info) in blocks {
-        println!("Code block ({})", info);
-        println!("{}", code);
-    }
 }

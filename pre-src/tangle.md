@@ -24,22 +24,22 @@ to the `⟨Example⟩` section:
 
 Blocks not introduced by a name are treated as part of the unnamed section
 string.  If there are no named blocks, the result of
-`Tangle.new(&source).get("")` is the simply concatenation of the code blocks
+`Tangle.new(&source).get_section("")` is the simply concatenation of the code blocks
 labeled `rust` in `source`.
 
 Code sections may reference one another:
 
     ```rust
-    ⟨Get cheese or panic⟩
-        if ⟨Moon is made of green cheese⟩ {
+    ⟨Get cheese or panic⟩≡
+        if Moon::is_made_of("green cheese") {
             ⟨Export cheese to Earth⟩
         } else {
             panic!("No cheese!")
         }
     ```
 
-would cause the bodies of the `⟨Moon is made of green cheese⟩` and `⟨Export
-cheese to Earth⟩` sections to be inserted in the ⟨Get cheese or panic⟩ section.
+would cause the body of the `⟨Export cheese to Earth⟩` section to be inserted in
+the ⟨Get cheese or panic⟩ section.
 
 ## Tests
 
@@ -59,7 +59,7 @@ mod tests {
         spaces.replace_all(&uncomment, " ").to_string()
     }
     fn tangle(text: &str) -> String {
-        Tangle::new(text).get("").unwrap()
+        Tangle::new(text).get_section("").unwrap()
     }
     #[test]
     fn tangle_plain_code() {
@@ -89,7 +89,7 @@ As we said above, a block might contain a reference to a code section:
 
     ```rust
     ⟨Set `root` to the least `r` such that `r * r ≥ n`⟩≡
-		let root = (n as f64).sqrt() as u32;
+        let root = (n as f64).sqrt() as u32;
     ```
 
 This example may seem like overkill — but suppose the named section was actually
@@ -113,51 +113,96 @@ Here's a test that named sections do indeed get expanded:
     }
 ```
 
+Tangle will also report user errors.
+
+```rust
+⟨Other tests and helpers⟩≡
+    fn errors(body: &str) -> Errors {
+        let rb = rust(body);
+        let mut t = Tangle::new(&rb);
+        t.get_section("").unwrap();
+        t.errors().clone()
+    }
+    #[test]
+    fn tangle_simple_error() {
+        assert_eq!(
+            errors("    \"strin"),
+            vec![String::from("unterminated double quote string at line 2, col 4\n")]
+        );
+    }
+```
+        
 ## Implementation
 
 `Tangle` has three methods:
 - `let tangle = Tangle::new(text)` creates a new `Tangle` from a Markdown `str`.
-- `tangle.get("")` gets the final product, concatenating the expansions of all
-  the blocks in the unnamed section, while `tangle.get(section_name)` returns
+- `tangle.get_section("")` gets the final product, concatenating the expansions of all
+  the blocks in the unnamed section, while `tangle.get_section(section_name)` returns
   the section with the given name.
 - The private method `expand` does the actual expansion.
 
 ```rust
 use std::collections::HashMap;
-use code_extractor::{CodeExtractor};
-use block_parse::{BlockParse};
+use code_extractor::CodeExtractor;
+use block_parse::BlockParse;
+use line_counter::LineCounter;
+
 use Span;
 use Ilk;
 
-type CodeBlocks<'a> = HashMap<String, Vec<&'a str>>;
+struct BlockInfo<'a>  {
+    block: &'a str,
+    block_line: usize,
+    block_col: usize,
+}
+
+type CodeBlocks<'a> = HashMap<String, Vec<BlockInfo<'a>>>;
+type Errors = Vec<String>;
 pub struct Tangle<'a> {
     sections: CodeBlocks<'a>,
+    errors: Errors,
 }
 
 use failure::Error;
 impl<'a> Tangle<'a> {
     pub fn new(text: &'a str) -> Tangle<'a> {
+        let mut lc = LineCounter::new(text);
         let mut sections = CodeBlocks::default();
-        for (info, code) in CodeExtractor::new(text) {
-            if info == "rust" {
-                let (key, code) = extract_key(code); 
+        for (code, info_string, offset) in CodeExtractor::new(text) {
+            if info_string == "rust" {
+                let (key, block) = extract_key(code); 
+                let (block_line, block_col) = lc.line_and_column(offset);
                 let mut section = sections.entry(key).or_insert_with(|| vec![]);
-                section.push(code);
+                section.push(BlockInfo{block, block_line, block_col});
             }
         }
-        Tangle{sections}
+        Tangle{sections, errors: Vec::new()}
     }
-    pub fn get(&self, key: &str) -> Result<String, Error> {
+    pub fn errors(&self) -> &Errors { &self.errors }
+
+    pub fn get_section(&mut self, key: &str) -> Result<String, Error> {
+        let mut errors = Vec::new();
+        let expansion = self.get(key, &mut errors);
+        self.errors = errors;
+        expansion
+    }
+    pub fn get(&self, key: &str, mut errors: &mut Errors) -> Result<String, Error> {
         match self.sections.get(key) {
-            Some(section) => Ok(self.expand(section)?),
+            Some(section) => Ok(self.expand(section, &mut errors)?),
             None => ⟨Complain that `key` was not found⟩
         }
     }
-    fn expand(&self, section: &[&str]) -> Result<String, Error> {
+    fn expand(&self, section: &[BlockInfo], mut errors: &mut Errors) -> Result<String, Error> {
         let mut expansion = String::new();
-        for block in section {
+        for &BlockInfo{block, block_line, block_col} in section {
+            let mut lc = LineCounter::new(block);
             let mut current = 0; // Index of the last unprocessed byte of block
             for Span{lo, hi, ilk} in BlockParse::new(block) {
+                let (line, col) = {
+                    let (l, c) = lc.line_and_column(lo);
+                    if l == block_line { (l, block_col + c) }
+                    else { (block_line + l, c ) }
+                };
                 // Append anything before the `Span` to `expansion`
                     if current < lo {
                         expansion += &block[current..lo];
@@ -171,10 +216,17 @@ impl<'a> Tangle<'a> {
                             expansion += "\n";
                         // Append the section body
                         let key = normalize_whitespace(&block[lo+3..hi-3]);
-                        expansion += &self.get(&key)?;
+                        match self.get(&key, &mut errors) {
+                            Ok(ref section_body) => expansion += section_body,
+                            Err(ref complaint) => errors.push(format!(
+                                "{} at line {}, col {}\n", complaint, line, col
+                            )),
+                        }
                     }
                     Ilk::Unterminated(kind) => {
-                        eprintln!("unterminated {}:\n|{}|", kind, &block[lo..hi]);
+                        errors.push(format!(
+                            "unterminated {} at line {}, col {}\n", kind, line, col,
+                        ));
                     }
                 }
             }

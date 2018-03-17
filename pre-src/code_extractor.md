@@ -105,19 +105,19 @@ until we see an `End(CodeBlock(_))`. At that point, `end` is the end of the last
 
 We're going to build an iterator to pull out code blocks with info strings from
 a text string `text` (usually the entire contents of a Markdown file).  Each
-item returned will be a tuple of a `String` (the info string) and an immutable
-`&str` which points to the substring of `text` containing the code block proper.
+item returned will be a tuple of a string slice (the substring of `text`
+containing the code block proper), a `String` (the info string), and a `usize`
+(the offset of the string within `text`).
 
 ```rust
-type RawCode<'a> = (String, &'a str);
+type AnnotatedCode<'a> = (&'a str, String, usize);
 ```
 
 Because `pulldown`'s parser returns each code block as a series of `Text` events
 rather than as one large text event, we'll use the strings embedded in pulldown
 events only for the info string.  For the code block proper, we'll use
 `get_offset()`, as above, to find the start and end of the code block, returning
-a slice of `text` (whose lifetime must therefore be the same as the lifetime of
-`text`).
+a slice of `text` (where the slice's lifetime is the same as `text`'s).
 
 ```rust
 pub(crate) struct CodeExtractor<'a> {
@@ -135,22 +135,22 @@ impl<'a> CodeExtractor<'a> {
 ```
 
 We can't just `map()` and `filter()` the output of the pulldown parser, since
-the `RawCode` items we output may coalesce an arbitrary number of pulldown
+the `AnnotatedCode` items we output may coalesce an arbitrary number of pulldown
 events.  Nevertheless, the logic is straightforward, not too different from our
 test above.
 
 ```rust
 impl<'a> Iterator for CodeExtractor<'a> {
-    type Item = RawCode<'a>;
+    type Item = AnnotatedCode<'a>;
 
-    fn next(&mut self) -> Option<RawCode<'a>> {
+    fn next(&mut self) -> Option<AnnotatedCode<'a>> {
         loop {
             let event = self.pulldown.next()?;
-            if let Start(CodeBlock(info)) = event {
-                let info = String::from(info);
+            if let Start(CodeBlock(info_string)) = event {
+                let info_string = String::from(info_string);
                 ⟨Find `start`, `end`, and the first non-`Text` `event`⟩;
                 if let End(CodeBlock(_)) = event {
-                    return Some((info, &self.text[start..end]));
+                    return Some((&self.text[start..end], info_string, start));
                 }
                 else { ⟨Handle an unexpected event⟩ }
             }
@@ -192,10 +192,10 @@ Here are some tests of the above code.
 
 ```rust
 ⟨Other tests⟩+≡
-    fn info_strings(text: &str) -> Vec<String> {
+    fn code_texts(text: &str) -> Vec<&str> {
         CodeExtractor::new(text).map(|x| x.0).collect()
     }
-    fn code_texts(text: &str) -> Vec<&str> {
+    fn info_strings(text: &str) -> Vec<String> {
         CodeExtractor::new(text).map(|x| x.1).collect()
     }
 

@@ -52,6 +52,9 @@ mod tests {
         let mut c = lc("a\nb\nc\n");
         assert_eq!(c.line_of(3), 1);
         assert_eq!(c.line_of(2), 1);
+        let mut c = lc("\n\n\n");
+        assert_eq!(c.line_of(1), 1);
+        assert_eq!(c.line_of(1), 1);
     }
     #[cfg(debug_assertions)]
     #[should_panic]
@@ -61,13 +64,20 @@ mod tests {
         assert_eq!(c.line_of(2), 1);
         assert_eq!(c.line_of(0), 1);
     }
+    // And a column test
+    #[test] fn lc_column() {
+        let mut c = lc("abc\ndef");
+        assert_eq!(c.line_and_column(0), (0,0));
+        assert_eq!(c.line_and_column(2), (0,2));
+        assert_eq!(c.line_and_column(5), (1,1));
+    }
 }
 ```
 
 The `memchr` crate gives us a fast interator over the postions of newlines in
 the Markdown text.  It will be useful to pretend that there is an infinite
 supply of newlines, infinitely far from the end of our text. (Where "infinitely
-far" means "at position `usize::MAX`".)
+far" means "at position `usize::max_value()`".)
 
 ```rust
 use memchr::Memchr;
@@ -80,7 +90,7 @@ impl<'a> Newlines<'a> {
     fn next(&mut self) -> usize {
         match self.0.next() {
             Some(n) => n,
-            None => ::std::usize::MAX,
+            None => usize::max_value(),
         }
     }
 }
@@ -94,13 +104,14 @@ So if a series of `next()` calls on the inner `Memchr` returns
 then the equivalent series of `next()` calls on our `Newlines` object returns
 
 ```rust,ignore
-    i, j, k, usize:MAX, usize:MAX, usize:MAX, ...
+    i, j, k, usize::max_value(), usize::max_value(), usize::max_value(), ...
 ```
 
-We'll also need a `Line` struct to hold information on the last line found so
-far: `start` records start of the current line, `end` the line's end, and
-`number` the line number returned by `line_of()`.  We initialize things as they
-would be after a call to `line_of(0)`.
+We'll be using `Newlines` to find the next newline at or after a given offset,
+incrementing the line number each time we call `next()`.  We'll also need fields
+to hold information on the current line: the line number, the postion of the
+line's (real or virtual) newline, and the postion of the first character of the
+line. We initialize things as they would be after a call to `line_of(0)`.
 
 ```rust
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -108,46 +119,55 @@ pub struct Line {pub start: usize, pub end: usize, pub number: usize}
 
 pub (crate) struct LineCounter<'a> {
     newlines: Newlines<'a>,
-    current: Line,
+    number: usize,
+    start: usize,
+    end: usize,
 }
-```
 
-We'll be using `Newlines` to find the next newline at or after a given offset,
-incrementing the line number each time we call `next()`.  We store the current
-line end so we know whether or not to call `next()` again for a given offset,
-and the current line number so we can return or update it.
-
-```rust
 impl<'a> LineCounter<'a> {
     pub fn new(text: &'a str) -> LineCounter<'a> {
         let mut newlines = Newlines::new(text);
         let end = newlines.next();
-        LineCounter{newlines, current: Line {start: 0, end, number: 0}}
+        LineCounter{newlines, number: 0, start: 0, end}
     }
     pub fn line_of(&mut self, offset: usize) -> usize {
-        debug_assert!(self.current.start <= offset);
-        self.current.start = self.current.end;
-        ⟨Set `current.number` to the line number⟩
-        self.current.number
+        self.setup(offset);
+        self.number
     }
+    pub fn line_and_column(&mut self, offset: usize) -> (usize, usize) {
+        self.setup(offset);
+        (self.number, offset - self.start)
+    }
+    ⟨Define `fn setup`⟩
 }
 ```
 
-Each line counter has the invariant that `current.end` is always the end of the
-current line: the position of the first newline at or after the last `offset`
-argument to `line_of()` (or simply the first newline, for the line counter value
-returned by `new()`); and that `current.number` is the count of newlines whose
-postion is strictly less than `current.end`.
+Each line counter maintains these invariants:
+
+- `end` is the end of the current line: the position of the first
+  newline at or after the last `offset` argument to `setup()` (or simply the
+  first newline, for the line counter value returned by `new()`);
+- `start` is the first character of the previous line.
+- `number` is the count of newlines whose postion is strictly less than
+  `end`.
 
 Calling `newlines.next()` gives us the offset of the next newline in `text`. So
 to find the line number of the `offset` parameter, we keep calling
 `newline.next()` until it returns a number at least as great as `offset`.
 
 ```rust
-⟨Set `current.number` to the line number⟩≡
-    while self.current.end < offset {
-        self.current.number += 1;
-        self.current.end = self.newlines.next();
+⟨Define `fn setup`⟩≡
+    pub fn setup(&mut self, offset: usize) {
+        debug_assert!(self.start <= offset);
+        while self.end < offset {
+            self.number += 1;
+            self.start = self.end+1;
+            self.end = self.newlines.next();
+        }
     }
 ```
+
+And here are a few tests of the column function:
+
+```rust
 
