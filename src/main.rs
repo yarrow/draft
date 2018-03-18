@@ -38,7 +38,7 @@ fn run() -> Result<(), Error> {
     let markdown = slurp(path)?;
 
     let mut tangle = Tangle::new(&markdown);
-    print!("{}", tangle.get_section("")?);
+    print!("{}", tangle.get("")?);
     Ok(())
 }
 

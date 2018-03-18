@@ -16,6 +16,8 @@
     ))]
 //! See README
 
+use std::fmt;
+
 extern crate memchr;
 extern crate pulldown_cmark;
 extern crate regex;
@@ -31,10 +33,23 @@ mod block_parse;
 mod code_extractor;
 mod line_counter;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Ilk {
     SectionName,
+    JustCode,
+    NotFound(String),
     Unterminated(&'static str),
+}
+
+impl fmt::Display for Ilk {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Ilk::SectionName => write!(f, "Section Name"),
+            Ilk::JustCode => write!(f, "Just Code"),
+            Ilk::NotFound(ref complaint) => write!(f, "{}", complaint),
+            Ilk::Unterminated(thingy) => write!(f, "Unterminated {}", thingy),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

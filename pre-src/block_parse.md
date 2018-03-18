@@ -1,20 +1,23 @@
 BlockParse
 ==========
 
-The call `BlockParse::new(text)` returns an iterator over the interesting parts
-of `text`.  (The uninteresting parts are simply appended to the output.) A
-`Span` is interesting if it is a section name (which `Tangle` must expand), or
-an unterminated comment or quote (which `Tangle` must report to the user).
-Specifically, for each occurence of a section name `⟨ … ⟩` in `text` the
+The call `BlockParse::new(text)` returns an iterator over the parts of `text`.
+The uninteresting parts (`JustCode`) are simply appended to the output by
+Tangle. A `Span` is interesting if it is a section name (which `Tangle` must
+expand), or an unterminated comment or quote (which `Tangle` must report to the
+user).  Specifically, for each occurence of a section name `⟨ … ⟩` in `text` the
 iterator returns a `Span{lo, hi, ilk: SectionName}` value such that
 `text[lo..hi]` is the section name found.  While if it finds a comment, quote,
 or block name that begins within the block but doesn't end, it returns a
 `Span{lo, hi, ilk: Unterminated(s)}` value where `s` describes the unterminated
 item.
 
+The iterator will also return the `JustCode` sections that occur between
+interesting sections.
+
 (We need to parse comments and quotes because an angle bracket '⟨' that occurs
 inside one of those has no special significance, so it doesn't start a section
-name. The iterator skips paste comments and quotes.)
+name. Assuming they are properly terminated they are treated as `JustCode`.)
 
 Here's the implementation outline:
 
@@ -22,16 +25,17 @@ Here's the implementation outline:
 use regex::Regex;
 use Span;
 use Ilk;
-use Ilk::{Unterminated, SectionName};
+use Ilk::{JustCode, SectionName, Unterminated};
 
 pub(crate) struct BlockParse<'a> {
     text: &'a str,
     scan_from: usize,
+    pending: Option<Span>,
 }
 
 impl<'a> BlockParse<'a> {
     pub(crate) fn new(text: &'a str) -> BlockParse<'a> {
-        BlockParse{text, scan_from: 0}
+        BlockParse{text, scan_from: 0, pending: None}
     }
     ⟨Private methods⟩
 }
@@ -131,7 +135,9 @@ mod tests {
     fn expect_ok(prefix: &str, msg: &str) {
         let lo = prefix.len();
         let text = String::from(prefix) + SECTION_NAME;
-        let names: Vec<Span> = BlockParse::new(&text).collect();
+        let names: Vec<Span> = BlockParse::new(&text).filter(
+            |s| match s.ilk { JustCode => false, _ => true}
+        ).collect();
         assert_eq!(names, [Span{lo, hi:text.len(), ilk: SectionName}], "{}", msg);
     }
 
@@ -168,43 +174,79 @@ their block; unterminated characters stop after one possibly escaped character.
     }
 ```
 
+And some regression tests:
+
+```rust
+⟨Tests⟩≡
+    #[test]
+    fn test_just_code() {
+        let span_vec: Vec<Span> = BlockParse::new("a\n").collect();
+        let expected: Vec<Span> = vec![Span{lo: 0, hi: 2, ilk: JustCode}];
+        assert_eq!(span_vec, expected);
+    }
+```
+    
 ## Implementation
 
-The `BlockParse` iterator's `next` method looks for the start of an item:
-section name, comment, or string or character literal, returning `None` if it
-can't find one. If it finds a valid section name, or an unterminated item, it
-will return a `Span` value with the starting and ending indices of the item in
-`text`. If the item is unterminated, the value's `ilk` field is `Unterminated`,
-with a string describing the kind of the unterminated item. The `ilk` of a valid
-section name is `SectionName`.
+The `next` method can return `JustCode`, text that should be output as-is; a
+`SectionName`, which Tangle will expand; or an `Unterminated` item, for which
+Tangle will emit an error message.  We proceed by skipping forward to a
+`SectionName` or `Unterminated` item, saving it in `pending`, and emitting the `JustCode`
+that we skipped. Then on the next call to `next`, we see there is a `pending`
+item and return it.
 
 ```rust
 ⟨The `next` method⟩≡
     fn next(&mut self) -> Option<Span> {
-        lazy_static! {
-            static ref START: Regex = Regex::new(r##"(?x)// | ⟨ | /\* | r\#*" | " | ' "##).unwrap();
+
+        if self.pending.is_some() {
+            return { self.pending.take() }
         }
+        
+        if self.scan_from == self.text.len() { return None }
+
+        let scan_start = self.scan_from;
         loop {
-            let (found_start, start_len) = {
-                let found = START.find(self.unscanned())?;
-                (found.start(), found.end() - found.start())
-            };
-
-            let lo = self.scan_from + found_start;
-            self.scan_from = lo;
-
-            if let Some((hi, ilk)) = self.scan_item(start_len) {
-                self.scan_from = hi;
-                return Some(Span{lo, hi, ilk});
+            match self.item_start() {
+                None => {
+                    self.scan_from = self.text.len();
+                    return just_code(scan_start, self.text.len());
+                }
+                Some((found_start, start_len)) => {
+                    let lo = self.scan_from + found_start;
+                    self.scan_from = lo;
+                    if let Some((hi, ilk)) = self.scan_item(start_len) {
+                        self.scan_from = hi;
+                        self.pending = Some(Span{lo, hi, ilk});
+                        if lo == scan_start { return self.pending.take() }
+                        else { return just_code(scan_start, lo) }
+                    }
+                }
             }
         }
     }
 ```
 
-The `scan_item` method returns an `Option`: `None` when the item is succesfully
-parsed and is not a section name (and can therefore be ignored); a tuple
-containing the ending index of the item and its `Ilk` for a valid section name or
-an invalid item of any kind.
+```rust
+⟨Other definitions⟩≡
+    fn just_code(lo: usize, hi: usize) -> Option<Span> { Some(Span{lo, hi, ilk: JustCode}) }
+```
+
+```rust
+⟨Private methods⟩≡
+    fn item_start(&self) -> Option<(usize, usize)> {
+        lazy_static! {
+            static ref START: Regex = Regex::new(r##"(?x)// | ⟨ | /\* | r\#*" | " | ' "##).unwrap();
+        }
+        let found = START.find(self.unscanned())?;
+        Some((found.start(), found.end() - found.start()))
+    }
+```
+
+The `scan_item` method returns `None` when the item is succesfully parsed and is
+not a section name (and can therefore be ignored); but a tuple containing the
+ending index of the item and its `Ilk` for a valid section name or an invalid
+item of any kind.
 
 ```rust
 ⟨Other definitions⟩≡
@@ -215,6 +257,10 @@ The `scan_item` method expects `scan_from` to point to the first byte of the
 item. It uses that byte to determine which pattern to use to find the end of the
 item. (Unless the byte is `b'/'`, in which case `scan_from` looks at the next
 byte, to distinguish block comments from line comments.)
+
+If it scans a valid section name, the `Ilk` returned is `SectionName`.  If the
+item is unterminated, the `Ilk` returned is `Unterminated`, with a string
+describing the kind of the unterminated item.
 
 ```rust
 ⟨Private methods⟩≡

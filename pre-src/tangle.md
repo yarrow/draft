@@ -24,7 +24,7 @@ to the `⟨Example⟩` section:
 
 Blocks not introduced by a name are treated as part of the unnamed section
 string.  If there are no named blocks, the result of
-`Tangle.new(&source).get_section("")` is the simply concatenation of the code blocks
+`Tangle.new(&source).get("")` is the simply concatenation of the code blocks
 labeled `rust` in `source`.
 
 Code sections may reference one another:
@@ -59,7 +59,7 @@ mod tests {
         spaces.replace_all(&uncomment, " ").to_string()
     }
     fn tangle(text: &str) -> String {
-        Tangle::new(text).get_section("").unwrap()
+        Tangle::new(text).get("").unwrap()
     }
     #[test]
     fn tangle_plain_code() {
@@ -117,57 +117,54 @@ Tangle will also report user errors.
 
 ```rust
 ⟨Other tests and helpers⟩≡
-    fn errors(body: &str) -> Errors {
+    fn errors(body: &str) -> Vec<String> {
         let rb = rust(body);
         let mut t = Tangle::new(&rb);
-        t.get_section("").unwrap();
-        t.errors().clone()
+        t.get("").unwrap();
+        t.errors()
     }
     #[test]
     fn tangle_simple_error() {
         assert_eq!(
             errors("    \"strin"),
-            vec![String::from("unterminated double quote string at line 2, col 4\n")]
+            vec![String::from("Unterminated double quote string at line 2, col 4\n")]
         );
     }
 ```
         
 ## Implementation
 
-`Tangle` has three methods:
-- `let tangle = Tangle::new(text)` creates a new `Tangle` from a Markdown `str`.
-- `tangle.get_section("")` gets the final product, concatenating the expansions of all
-  the blocks in the unnamed section, while `tangle.get_section(section_name)` returns
-  the section with the given name.
-- The private method `expand` does the actual expansion.
-
+blah blah blah
 ```rust
 use std::collections::HashMap;
+use std::fmt;
+
 use code_extractor::CodeExtractor;
 use block_parse::BlockParse;
 use line_counter::LineCounter;
+use failure::Error;
 
 use Span;
 use Ilk;
+```
 
-struct BlockInfo<'a>  {
-    block: &'a str,
-    block_line: usize,
-    block_col: usize,
-}
+`Tangle` has three public methods:
+- `let tangle = Tangle::new(text)` creates a new `Tangle` from a Markdown `str`.
+- `tangle.get("")` gets the final product, concatenating the expansions of all
+  the blocks in the unnamed section, while `tangle.get(section_name)` returns
+  the section with the given name.
+- `tangle.errors()` returns a vector of strings with error messages.
 
-type CodeBlocks<'a> = HashMap<String, Vec<BlockInfo<'a>>>;
-type Errors = Vec<String>;
+```rust
 pub struct Tangle<'a> {
-    sections: CodeBlocks<'a>,
-    errors: Errors,
+    sections: SectionMap<'a>,
+    errors: ErrMsgs,
 }
 
-use failure::Error;
 impl<'a> Tangle<'a> {
     pub fn new(text: &'a str) -> Tangle<'a> {
         let mut lc = LineCounter::new(text);
-        let mut sections = CodeBlocks::default();
+        let mut sections = SectionMap::default();
         for (code, info_string, offset) in CodeExtractor::new(text) {
             if info_string == "rust" {
                 let (key, block) = extract_key(code); 
@@ -178,79 +175,130 @@ impl<'a> Tangle<'a> {
         }
         Tangle{sections, errors: Vec::new()}
     }
-    pub fn errors(&self) -> &Errors { &self.errors }
+    pub fn errors(&self) -> Vec<String> {
+        self.errors.iter().map(|e| format!("{}", e)).collect()
+    }
 
-    pub fn get_section(&mut self, key: &str) -> Result<String, Error> {
+    pub fn get(&mut self, key: &str) -> Result<String, Error> {
+        let compressed = match self.sections.get_section(key) {
+            Ok(section) => section,
+            Err(ilk) => bail!("{}", ilk),
+        };
         let mut errors = Vec::new();
-        let expansion = self.get(key, &mut errors);
+        let expansion = self.expand(compressed, &mut errors);
         self.errors = errors;
-        expansion
+        Ok(expansion)
     }
-    pub fn get(&self, key: &str, mut errors: &mut Errors) -> Result<String, Error> {
-        match self.sections.get(key) {
-            Some(section) => Ok(self.expand(section, &mut errors)?),
-            None => ⟨Complain that `key` was not found⟩
-        }
-    }
-    fn expand(&self, section: &[BlockInfo], mut errors: &mut Errors) -> Result<String, Error> {
+```
+
+The bulk of the work is done in the private `expand` method. It examines each
+block in the given `section`, and each `span` in the block, expanding section
+name references and adding appropriate errors.
+
+```rust
+    fn expand(&self, section: &[BlockInfo], mut errors: &mut ErrMsgs) -> String {
         let mut expansion = String::new();
-        for &BlockInfo{block, block_line, block_col} in section {
-            let mut lc = LineCounter::new(block);
-            let mut current = 0; // Index of the last unprocessed byte of block
-            for Span{lo, hi, ilk} in BlockParse::new(block) {
-                let (line, col) = {
-                    let (l, c) = lc.line_and_column(lo);
-                    if l == block_line { (l, block_col + c) }
-                    else { (block_line + l, c ) }
-                };
-                // Append anything before the `Span` to `expansion`
-                    if current < lo {
-                        expansion += &block[current..lo];
-                    }
-                    current = hi;
-                match ilk {
+        for block_info in section {
+            let mut lc = LineCounter::new(block_info.block);
+            for span in BlockParse::new(block_info.block) {
+                match span.ilk {
                     Ilk::SectionName => {
-                        // Append the section name as a comment
-                            expansion += "\n// ";
-                            expansion += &block[lo..hi];
-                            expansion += "\n";
-                        // Append the section body
-                        let key = normalize_whitespace(&block[lo+3..hi-3]);
-                        match self.get(&key, &mut errors) {
-                            Ok(ref section_body) => expansion += section_body,
-                            Err(ref complaint) => errors.push(format!(
-                                "{} at line {}, col {}\n", complaint, line, col
-                            )),
+                        let key = slice(block_info, &span);
+                        match self.sections.get_section(key) {
+                            Ok(section_body) => {
+                                // Append the section name as a comment, then the body
+                                expansion += "\n// ";
+                                expansion += key;
+                                expansion += "\n";
+                                expansion += &self.expand(section_body, &mut errors);
+                            }
+                            Err(ilk) => {
+                                expansion += key;
+                                errors.push(err_msg(&mut lc, block_info, span));
+                            }
                         }
                     }
-                    Ilk::Unterminated(kind) => {
-                        errors.push(format!(
-                            "unterminated {} at line {}, col {}\n", kind, line, col,
-                        ));
-                    }
+                    Ilk::Unterminated(kind) => errors.push(err_msg(&mut lc, block_info, span)),
+                    Ilk::JustCode => expansion += slice(block_info, &span),
+                    _ => unreachable!(),
                 }
             }
-            // Append anything after the last section name
-                if current < block.len() {
-                    expansion += &block[current..];
-                }
         }
-        Ok(expansion)
+        expansion
     }
 }
 ```
 
-If a section name isn't found, we reference it in our error message.  If the
-empty string isn't found, there were no unnamed code blocks in the Markdown
-file.
+The `SectionMap` field of `Tangle` is a map from strings to vectors of
+`BlockInfo`, and `BlockInfo` struct consists of a pointer to a string slice
+together with the line and column of the start of the string in the `text`
+passed to `Tangle::new`.
 
 ```rust
-⟨Complain that `key` was not found⟩≡
-    if key.is_empty() {
-        bail!("No unnamed code blocks were found")
-    } else {
-        bail!("No section named ⟨{}⟩ was found", key)
+type SectionMap<'a> = HashMap<String, SectionBlocks<'a>>;
+type SectionBlocks<'a> = Vec<BlockInfo<'a>>; 
+struct BlockInfo<'a>  {
+    block: &'a str,
+    block_line: usize,
+    block_col: usize,
+}
+
+fn slice<'a>(info: &BlockInfo<'a>, span: &Span) -> &'a str {
+    &info.block[span.lo..span.hi]
+}
+```
+
+A `Span` has line and column numbers relative to the beginning of its block.  To
+produce accurate line numbers, we need to add the block's line number to the
+span's line number. And if (as may happen) a block doesn't begin in column zero,
+then spans in the first line of the block need to have an adjusted colum.
+
+```rust
+fn err_msg(mut lc: &mut LineCounter, info: &BlockInfo, span: Span) -> ErrMsg {
+    let (line, col) = {
+        let (l, c) = lc.line_and_column(span.lo);
+        if l == 0 { (info.block_line, info.block_col + c) }
+        else { (info.block_line + l, c ) }
+    };
+    ErrMsg{pos: Pos{line, col}, ilk: span.ilk}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Pos {
+    line: usize,
+    col: usize,
+}
+struct ErrMsg {
+    pos: Pos,
+    ilk: Ilk,
+}
+impl fmt::Display for ErrMsg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} at line {}, col {}\n", self.ilk, self.pos.line, self.pos.col)
     }
+}
+type ErrMsgs = Vec<ErrMsg>;
+```
+
+We use a specialized method, `get_section`, to look up sections in a
+`SectionMap`: removing extraneous whitespace from the key, and returning an
+`Ilk` value if the key is not found.
+
+```rust
+trait GetSection {
+    fn get_section(&self, key: &str) -> Result<&SectionBlocks, Ilk>;
+}
+impl<'a> GetSection for SectionMap<'a> {
+    fn get_section(&self, key: &str) -> Result<&SectionBlocks, Ilk> {
+        match self.get(&normalize_whitespace(key)) {
+            Some(section) => Ok(section),
+            None => Err(Ilk::NotFound(
+                if key.is_empty() { "No unnamed code blocks were found".to_string() }
+                else { format!("Section ⟨{}⟩ was never defined", key) }
+            ))
+        }
+    }
+}
 ```
 
 To add a block to the `sections` table, we must first check for a section
@@ -261,7 +309,7 @@ between `⟨` and `⟩`, with whitespace normalized.
 use regex::Regex;
 fn extract_key(text: &str) -> (String, &str) {
     lazy_static! {
-        static ref TITLE: Regex = Regex::new(r"(?s)^\s*⟨(.*?)⟩(?:\+?)≡[ \t\r]*").unwrap();
+        static ref TITLE: Regex = Regex::new(r"(?s)^\s*(⟨.*?⟩)(?:\+?)≡[ \t\r]*").unwrap();
     }
     let mut text = text;
     let mut key = String::from("");
@@ -280,8 +328,15 @@ fn extract_key(text: &str) -> (String, &str) {
 fn normalize_whitespace(text: &str) -> String {
     lazy_static! {
         static ref WHITESPACE: Regex = Regex::new(r"\s+").unwrap();
+        static ref SECTION_NAME: Regex = Regex::new(r"(?s:^⟨\s*(.*?)\s*⟩$)").unwrap();
     }
-    String::from(WHITESPACE.replace_all(text.trim(), " "))
+    if let Some(inside) = SECTION_NAME.captures(text) {
+        let inside = inside.get(1).unwrap();
+        String::from(WHITESPACE.replace_all(inside.as_str(), (" ")))
+    }
+    else {
+        String::from(text)
+    }
 }
 ```
 
